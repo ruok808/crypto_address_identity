@@ -146,16 +146,26 @@
 
 ## Task 14: Explicit Live-Fetch Gate and BTC Consumer Handoff
 
-- [ ] Stop after local verification and independent review. Do not run a live provider call automatically.
-- [ ] Present the bounded live-fetch proposal: candidate count, reason distribution, 20/minute ceiling, requested byte budget, retention location, and expected output paths, without exposing a token.
-- [ ] After explicit approval only, run a small dry-run first, then one bounded BTC-only non-dry-run fetch.
-- [ ] Audit observation outcomes, raw-object hashes, evidence tiers, conflicts, resolver snapshot checksum, and secret-redaction results.
-- [ ] Perform a read-only `quant_crypto` BTC replay from a pinned snapshot and confirm no business-decision changes.
+- [x] Stop after local verification and independent review. Do not run a live provider call automatically.
+- [x] Present the bounded live-fetch proposal: candidate count, reason distribution, 20/minute ceiling, requested byte budget, retention location, and expected output paths, without exposing a token.
+- [x] After explicit approval only, run a small dry-run first, then one bounded BTC-only non-dry-run fetch.
+- [x] Audit observation outcomes, raw-object hashes, evidence tiers, conflicts, resolver snapshot checksum, and secret-redaction results.
+- [x] Perform a read-only `quant_crypto` BTC replay from a pinned snapshot and confirm no business-decision changes.
 - [ ] Treat any actual `quant_crypto` code integration, deployment, or alert-policy change as a separate implementation plan and approval.
 
 Local implementation intentionally stops at this gate. A real provider fetch, any
 `quant_crypto` replay against production-shaped inputs, and all consumer rollout
 work require a separate explicit approval.
+
+## PoC Execution Record (2026-07-22)
+
+- Explicit user approval covered a BTC-only discovery PoC for 10 candidates: 8 existing public-tag or custody samples, including two known conflict cases, plus 2 repeated historical `InternalCandidate` samples.
+- The no-network dry run selected 10 discovery profiles. The live run used the `20/minute` tenant ceiling, `1 MiB` run budget, and `0` transport retries; it completed with `10/10` successful responses and `4,783` received bytes.
+- Raw preservation created 10 content-addressed objects. Hash verification returned `active` for all 10; no request header, token, or raw response body was emitted to CLI output or documentation.
+- The parser produced 20 Tier C records: non-empty entity and address-label evidence for all 10 candidates, and zero wallet-role evidence. All resolver results remain `resolved:discovery_only`; no provider label was accepted for monitor enrollment or suppression.
+- External comparison against the existing `quant_crypto` sample labels matched 8/10 entities. The two known disagreements remain explicit external conflicts: existing `OKX` versus provider `Gemini` for `3Mg...`, and existing `OKX` versus provider `VanEck` for `3FM...`.
+- The checksum-pinned BTC resolver snapshot has manifest SHA-256 `e6f114557e59add81f64e947d7c3215d8d9b290096f5a3b978b4729fc7663b0d`. A read-only three-event replay reported `changed_business_fields=0`.
+- Decision: do not integrate with `quant_crypto` yet. First define a separate consumer-integration plan after independent evidence ingestion and a broader reliability panel.
 
 ## Test Commands
 
