@@ -75,6 +75,57 @@ def test_conflicting_claims_resolve_to_ambiguous_not_a_winner(runtime_root) -> N
     assert resolution.accepted_entity is None
 
 
+def test_same_entity_name_from_different_source_ids_corroborates_one_claim(runtime_root) -> None:
+    database = IdentityDatabase(runtime_root / "identity.sqlite3")
+    database.migrate()
+    evidence = EvidenceService(database, VerifierRegistry())
+    provider = _record(entity_id="arkham:okx", source_suffix="provider")
+    official = _record(
+        entity_id="official:okx", tier="B", source_authority="official", source_suffix="official"
+    )
+    provider = provider.model_copy(update={"candidate_entity_name": "OKX"})
+    official = official.model_copy(update={"candidate_entity_name": "OKX"})
+    evidence.import_records([provider, official])
+
+    ResolverService(database).rebuild(as_of="2026-07-22T01:00:00Z")
+    resolution = ResolverService(database).show("bitcoin", BTC_ADDRESS)
+
+    assert resolution.state == "resolved"
+    assert resolution.operational_tier == "discovery_only"
+    assert resolution.conflict_set_id is None
+
+
+def test_provider_tags_are_evidence_not_competing_primary_address_labels(runtime_root) -> None:
+    database = IdentityDatabase(runtime_root / "identity.sqlite3")
+    database.migrate()
+    evidence = EvidenceService(database, VerifierRegistry())
+    primary = EvidenceInput.model_validate(
+        {
+            "chain_key": "bitcoin",
+            "address": BTC_ADDRESS,
+            "assertion_type": "address_label",
+            "candidate_label": "Primary label",
+            "source_authority": "commercial_provider",
+            "evidence_tier": "C",
+            "verification_method": "api-observation",
+            "source_url": "https://example.test/provider",
+            "license_ref": "fixture-license",
+            "independence_group": "fixture-provider",
+            "observed_at": "2026-07-22T00:00:00Z",
+            "imported_by": "fixture",
+        }
+    )
+    tag = primary.model_copy(update={"candidate_label": "Hot", "provider_tag_id": "tag-hot"})
+    evidence.import_records([primary, tag])
+
+    ResolverService(database).rebuild(as_of="2026-07-22T01:00:00Z")
+    resolution = ResolverService(database).show("bitcoin", BTC_ADDRESS, assertion_type="address_label")
+
+    assert resolution.state == "resolved"
+    assert resolution.operational_tier == "discovery_only"
+    assert resolution.conflict_set_id is None
+
+
 def test_tier_b_requires_explicit_review_before_lookup_usable(runtime_root) -> None:
     database = IdentityDatabase(runtime_root / "identity.sqlite3")
     database.migrate()

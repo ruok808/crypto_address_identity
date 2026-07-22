@@ -3,22 +3,32 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from crypto_address_identity import __version__
+from crypto_address_identity.audit import build_provider_reliability_panel
 from crypto_address_identity.candidates import CandidateInput, CandidateService
 from crypto_address_identity.consumers.quant_crypto_btc import IdentityEnricher, replay_events
 from crypto_address_identity.core.config import Settings
 from crypto_address_identity.evidence import EvidenceInput, EvidenceService, VerifierRegistry
 from crypto_address_identity.exports import ResolverExporter
 from crypto_address_identity.fetch import FetchService
+from crypto_address_identity.proofs.okx_por import (
+    OkxBitcoinPorVerifier,
+    OkxPorProofError,
+    official_okx_evidence_records,
+    verified_okx_records,
+)
 from crypto_address_identity.providers.zero_x_router import ProviderTokenMissing, ZeroXRouterClient
+from crypto_address_identity.providers.zero_x_router import ProviderProfile
 from crypto_address_identity.resolver import ResolverService
 from crypto_address_identity.storage.raw_payloads import RawPayloadStore
 from crypto_address_identity.storage.sqlite import IdentityDatabase
@@ -48,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_run = fetch_commands.add_parser("run")
     fetch_run.add_argument("--dry-run", action="store_true")
     fetch_run.add_argument("--limit", type=int, default=100)
+    fetch_run.add_argument("--profile", choices=("auto", "discovery"), default="auto")
     fetch_run.set_defaults(handler=_handle_fetch_run)
 
     evidence = commands.add_parser("evidence")
@@ -56,6 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_import.add_argument("--file", type=Path, required=True)
     evidence_import.add_argument("--dry-run", action="store_true")
     evidence_import.set_defaults(handler=_handle_evidence_import)
+    evidence_okx_por = evidence_commands.add_parser("import-okx-btc-por")
+    evidence_okx_por.add_argument("--archive", type=Path, required=True)
+    evidence_okx_por.add_argument("--source-url", required=True)
+    evidence_okx_por.add_argument("--observed-at", required=True)
+    evidence_okx_por.add_argument("--limit", type=int, default=50)
+    evidence_okx_por.add_argument("--dry-run", action="store_true")
+    evidence_okx_por.set_defaults(handler=_handle_evidence_import_okx_btc_por)
 
     resolve = commands.add_parser("resolve")
     resolve_commands = resolve.add_subparsers(dest="resolve_command", required=True)
@@ -84,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     audit_coverage.add_argument("--since", required=True)
     audit_coverage.add_argument("--until", required=True)
     audit_coverage.set_defaults(handler=_handle_audit_coverage)
+    audit_provider_panel = audit_commands.add_parser("provider-panel")
+    audit_provider_panel.add_argument("--source-reference-prefix", required=True)
+    audit_provider_panel.set_defaults(handler=_handle_audit_provider_panel)
 
     replay = commands.add_parser("replay")
     replay_commands = replay.add_subparsers(dest="replay_command", required=True)
@@ -150,7 +171,17 @@ def _handle_fetch_run(arguments: argparse.Namespace) -> dict[str, Any]:
             raw_payloads=RawPayloadStore(database, settings.raw_payload_root),
             evidence=EvidenceService(database, VerifierRegistry()),
         )
-        return asdict(service.run(dry_run=arguments.dry_run, limit=arguments.limit))
+        result = asdict(
+            service.run(
+                dry_run=arguments.dry_run,
+                limit=arguments.limit,
+                profile_override=(
+                    ProviderProfile.DISCOVERY if arguments.profile == "discovery" else None
+                ),
+            )
+        )
+        result["profile_override"] = arguments.profile
+        return result
     finally:
         provider.close()
 
@@ -164,6 +195,71 @@ def _handle_evidence_import(arguments: argparse.Namespace) -> dict[str, Any]:
     database.migrate()
     result = EvidenceService(database, VerifierRegistry()).import_records(records)
     return {"status": "ok", "records": len(records), **asdict(result)}
+
+
+def _handle_evidence_import_okx_btc_por(arguments: argparse.Namespace) -> dict[str, Any]:
+    if arguments.limit < 1:
+        raise CliError("limit must be positive")
+    try:
+        archive_payload = arguments.archive.read_bytes()
+    except OSError as exc:
+        raise CliError("Unable to read official PoR archive") from exc
+    if len(archive_payload) > 100 * 1024 * 1024:
+        raise CliError("Official PoR archive exceeds the configured input limit")
+    try:
+        observed_at = _parse_utc_datetime(arguments.observed_at)
+        verified, summary = verified_okx_records(archive_payload, limit=arguments.limit)
+    except OkxPorProofError as exc:
+        raise CliError("Official PoR archive is invalid") from exc
+
+    artifact_sha256 = hashlib.sha256(archive_payload).hexdigest()
+    output = {
+        "status": "dry_run" if arguments.dry_run else "ok",
+        "source": "okx_btc_por",
+        "artifact_sha256": artifact_sha256,
+        "parsed_btc_multisig_rows": summary.parsed_btc_multisig_rows,
+        "verification_candidate_rows": summary.verification_candidate_rows,
+        "verified_rows": summary.verified_rows,
+        "invalid_rows": summary.invalid_rows,
+        "selected_rows": summary.selected_rows,
+        "written_paths": [],
+    }
+    if arguments.dry_run:
+        return output
+    if not verified:
+        raise CliError("Official PoR archive has no verified BTC multisig proofs")
+    try:
+        evidence_records = official_okx_evidence_records(
+            verified,
+            source_url=arguments.source_url,
+            artifact_sha256=artifact_sha256,
+            observed_at=observed_at,
+        )
+    except ValidationError as exc:
+        raise CliError("Official PoR source metadata is invalid") from exc
+
+    settings = Settings()
+    database = IdentityDatabase(settings.database_path)
+    database.migrate()
+    stored = RawPayloadStore(database, settings.raw_payload_root).persist(archive_payload)
+    if stored.payload_sha256 != artifact_sha256:
+        raise CliError("Official PoR artifact integrity check failed")
+    verifier = OkxBitcoinPorVerifier(
+        artifact_sha256=stored.payload_sha256,
+        verified_addresses=[record.address for record in verified],
+    )
+    result = EvidenceService(database, VerifierRegistry([verifier])).import_records(evidence_records)
+    output.update(
+        {
+            "inserted_count": result.inserted_count,
+            "duplicate_count": result.duplicate_count,
+            "raw_payload_status": RawPayloadStore(database, settings.raw_payload_root)
+            .verify(stored.payload_sha256)
+            .status,
+            "written_paths": [stored.relative_path],
+        }
+    )
+    return output
 
 
 def _handle_resolve_rebuild(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -229,6 +325,14 @@ def _handle_audit_coverage(arguments: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _handle_audit_provider_panel(arguments: argparse.Namespace) -> dict[str, Any]:
+    settings = Settings()
+    return build_provider_reliability_panel(
+        IdentityDatabase(settings.database_path),
+        source_reference_prefix=arguments.source_reference_prefix,
+    )
+
+
 def _handle_replay_btc(arguments: argparse.Namespace) -> dict[str, Any]:
     events = _read_ndjson(arguments.input)
     result = replay_events(events, IdentityEnricher.from_snapshot_directory(arguments.snapshot))
@@ -257,6 +361,16 @@ def _read_ndjson(path: Path) -> list[dict[str, Any]]:
             raise CliError("NDJSON records must be objects")
         values.append(value)
     return values
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CliError("Timestamp must be ISO-8601 UTC") from exc
+    if parsed.tzinfo is None:
+        raise CliError("Timestamp must be timezone-aware")
+    return parsed
 
 
 def _emit(value: dict[str, Any]) -> None:

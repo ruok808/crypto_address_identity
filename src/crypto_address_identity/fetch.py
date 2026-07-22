@@ -69,7 +69,14 @@ class FetchService:
         self.candidates = CandidateService(database)
         self.quota = QuotaManager(database)
 
-    def run(self, *, dry_run: bool, limit: int, now: datetime | None = None) -> FetchRunResult:
+    def run(
+        self,
+        *,
+        dry_run: bool,
+        limit: int,
+        now: datetime | None = None,
+        profile_override: ProviderProfile | None = None,
+    ) -> FetchRunResult:
         if limit < 1:
             raise ValueError("limit must be positive")
         observed_at = (now or datetime.now(UTC)).astimezone(UTC)
@@ -83,7 +90,15 @@ class FetchService:
             else:
                 seen_address_ids.add(candidate.address_id)
                 unique_selected.append(candidate)
-        work = [(candidate, self._select_profile(candidate, observed_at)) for candidate in unique_selected]
+        work = [
+            (
+                candidate,
+                self._select_profile(candidate, observed_at)
+                if profile_override is None
+                else self._select_profile_override(candidate, observed_at, profile_override),
+            )
+            for candidate in unique_selected
+        ]
         active_work = [(candidate, profile) for candidate, profile in work if profile is not None]
         skipped_fresh_count = len(work) - len(active_work)
         profile_counts = Counter(profile.value for _, profile in active_work)
@@ -282,6 +297,29 @@ class FetchService:
         if discovery_is_fresh and latest_detail is None and needs_detail:
             return ProviderProfile.DETAIL
         if discovery_is_fresh:
+            return None
+        return ProviderProfile.DISCOVERY
+
+    def _select_profile_override(
+        self, candidate: SelectedCandidate, now: datetime, profile: ProviderProfile
+    ) -> ProviderProfile | None:
+        """Honor an explicit audit profile without bypassing discovery freshness."""
+
+        if profile is not ProviderProfile.DISCOVERY:
+            raise ValueError("Only discovery may be selected as an explicit profile override")
+        with self.database.read_connection() as connection:
+            latest_discovery = connection.execute(
+                """
+                SELECT completed_at FROM source_observation
+                WHERE address_id = ? AND source_id = '0xrouter'
+                  AND query_profile = 'discovery' AND outcome = 'success'
+                ORDER BY completed_at DESC LIMIT 1
+                """,
+                (candidate.address_id,),
+            ).fetchone()
+        if latest_discovery and _is_fresh(
+            latest_discovery["completed_at"], now, self.settings.discovery_ttl_hours
+        ):
             return None
         return ProviderProfile.DISCOVERY
 

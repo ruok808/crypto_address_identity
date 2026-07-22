@@ -211,6 +211,8 @@ class ResolverService:
         stale_rows = [row for row in evidence_rows if not _is_active(row, as_of)]
         groups: dict[str, list] = defaultdict(list)
         for row in active_rows:
+            if not _claim_eligible(row):
+                continue
             groups[_canonical_asserted_value_from_row(row)].append(row)
 
         active_claims = [
@@ -447,7 +449,11 @@ def _canonical_asserted_value(
     candidate_wallet_role: str | None,
 ) -> str:
     if assertion_type == "entity_control":
-        raw = candidate_entity_id or candidate_entity_name
+        # Provider IDs live in source namespaces (for example `arkham:*`) and
+        # cannot by themselves define a distinct real-world entity. Exact
+        # normalized names let independent evidence corroborate one claim while
+        # retaining all provider IDs on the underlying immutable evidence rows.
+        raw = candidate_entity_name or candidate_entity_id
     elif assertion_type == "wallet_role":
         raw = candidate_wallet_role
     else:
@@ -477,6 +483,21 @@ def _is_active(row, as_of: str) -> bool:
     if row["expires_at"] and row["expires_at"] < as_of:
         return False
     return True
+
+
+def _claim_eligible(row) -> bool:
+    """Exclude multi-valued provider tags from a single-value label claim.
+
+    `arkhamLabel` has no provider tag id and remains a primary address label.
+    `populatedTags` carry a provider tag id and are retained as evidence only:
+    they can co-exist and must not manufacture a resolver conflict.
+    """
+
+    return not (
+        row["assertion_type"] == "address_label"
+        and row["source_authority"] == "commercial_provider"
+        and row["provider_tag_id"]
+    )
 
 
 def _tier_rank(tier: str) -> int:

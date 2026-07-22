@@ -9,7 +9,7 @@ from crypto_address_identity.candidates import CandidateInput, CandidateService
 from crypto_address_identity.core.config import Settings
 from crypto_address_identity.evidence import EvidenceService, VerifierRegistry
 from crypto_address_identity.fetch import FetchService
-from crypto_address_identity.providers.zero_x_router import ZeroXRouterClient
+from crypto_address_identity.providers.zero_x_router import ProviderProfile, ZeroXRouterClient
 from crypto_address_identity.storage.raw_payloads import RawPayloadStore
 from crypto_address_identity.storage.sqlite import IdentityDatabase
 
@@ -162,6 +162,27 @@ def test_high_priority_candidate_uses_detail_after_existing_discovery(runtime_ro
 
     assert result.profile_counts == {"detail": 1}
     assert result.selected_count == 1
+
+
+def test_explicit_discovery_override_does_not_upgrade_high_priority_candidate(runtime_root, env_mapping) -> None:
+    database, service = _service(
+        runtime_root,
+        env_mapping,
+        lambda request: httpx.Response(200, content=json.dumps(_payload()).encode()),
+    )
+    service.run(dry_run=False, limit=1, now=datetime(2026, 7, 22, tzinfo=UTC))
+    CandidateService(database).import_candidates([_candidate(priority=95)])
+
+    result = service.run(
+        dry_run=True,
+        limit=2,
+        now=datetime(2026, 7, 22, 1, tzinfo=UTC),
+        profile_override=ProviderProfile.DISCOVERY,
+    )
+
+    assert result.profile_counts == {}
+    assert result.selected_count == 0
+    assert result.skipped_fresh_count == 1
 
 
 def test_repeated_candidate_provenance_does_not_duplicate_provider_request(runtime_root, env_mapping) -> None:
