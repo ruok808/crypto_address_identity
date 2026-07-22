@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 from pydantic import ValidationError
 
 from crypto_address_identity import __version__
@@ -26,6 +27,11 @@ from crypto_address_identity.proofs.okx_por import (
     OkxPorProofError,
     official_okx_evidence_records,
     verified_okx_records,
+)
+from crypto_address_identity.proofs.bitwise_bitb import (
+    BitwiseBitbEvidenceError,
+    fetch_bitwise_bitb_snapshot,
+    official_bitwise_evidence_records,
 )
 from crypto_address_identity.providers.zero_x_router import ProviderTokenMissing, ZeroXRouterClient
 from crypto_address_identity.providers.zero_x_router import ProviderProfile
@@ -74,6 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_okx_por.add_argument("--limit", type=int, default=50)
     evidence_okx_por.add_argument("--dry-run", action="store_true")
     evidence_okx_por.set_defaults(handler=_handle_evidence_import_okx_btc_por)
+    evidence_bitwise_bitb = evidence_commands.add_parser("import-bitwise-bitb")
+    evidence_bitwise_bitb.add_argument("--dry-run", action="store_true")
+    evidence_bitwise_bitb.set_defaults(handler=_handle_evidence_import_bitwise_bitb)
 
     resolve = commands.add_parser("resolve")
     resolve_commands = resolve.add_subparsers(dest="resolve_command", required=True)
@@ -256,6 +265,47 @@ def _handle_evidence_import_okx_btc_por(arguments: argparse.Namespace) -> dict[s
             "raw_payload_status": RawPayloadStore(database, settings.raw_payload_root)
             .verify(stored.payload_sha256)
             .status,
+            "written_paths": [stored.relative_path],
+        }
+    )
+    return output
+
+
+def _handle_evidence_import_bitwise_bitb(arguments: argparse.Namespace) -> dict[str, Any]:
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=False, trust_env=False) as client:
+            snapshot = fetch_bitwise_bitb_snapshot(client)
+    except BitwiseBitbEvidenceError as exc:
+        raise CliError("BITB issuer address publication is unavailable or malformed") from exc
+
+    safe_payload = snapshot.safe_payload()
+    artifact_sha256 = hashlib.sha256(safe_payload).hexdigest()
+    evidence_records = official_bitwise_evidence_records(snapshot, artifact_sha256=artifact_sha256)
+    output = {
+        "status": "dry_run" if arguments.dry_run else "ok",
+        "source": "bitwise_bitb_public_wallets",
+        "address_count": len(snapshot.addresses),
+        "source_page_sha256": snapshot.source_page_sha256,
+        "reported_updated_at": snapshot.reported_updated_at,
+        "artifact_sha256": artifact_sha256,
+        "written_paths": [],
+    }
+    if arguments.dry_run:
+        return output
+
+    settings = Settings()
+    database = IdentityDatabase(settings.database_path)
+    database.migrate()
+    raw_payloads = RawPayloadStore(database, settings.raw_payload_root)
+    stored = raw_payloads.persist(safe_payload)
+    if stored.payload_sha256 != artifact_sha256:
+        raise CliError("BITB sanitized snapshot integrity check failed")
+    result = EvidenceService(database, VerifierRegistry()).import_records(evidence_records)
+    output.update(
+        {
+            "inserted_count": result.inserted_count,
+            "duplicate_count": result.duplicate_count,
+            "raw_payload_status": raw_payloads.verify(stored.payload_sha256).status,
             "written_paths": [stored.relative_path],
         }
     )

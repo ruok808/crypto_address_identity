@@ -10,7 +10,7 @@ consumer's thresholds, cursor, quality gates, lake writes, or alert decisions.
 
 ## Current Boundary
 
-- Fixture-first local development only.
+- Local evidence ledger with bounded, explicitly approved live evidence imports.
 - No live 0xRouter request is made without a separate explicit approval.
 - Bitcoin is the only enabled provider chain.
 - Ethereum, BSC, Solana, and Zcash are schema placeholders only.

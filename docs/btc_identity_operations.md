@@ -24,6 +24,20 @@ Dry runs validate candidate selection but do not write an ingestion run, raw
 payload, observation, evidence, claim, resolution, or export. Execute-mode
 fetches require an explicit live-fetch approval and a configured token.
 
+Official evidence importers are separate from provider enrichment. The OKX
+import verifies signed PoR rows from an operator-supplied public archive. The
+BITB importer retrieves only its fixed public issuer page; it stores a
+sanitized address snapshot rather than page HTML because the page can contain
+short-lived report links.
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity evidence import-bitwise-bitb --dry-run
+```
+
+The Tier B BITB evidence expires after 31 days and remains subject to explicit
+review before it becomes `lookup_usable`. Neither importer can modify a
+consumer's alert or suppression policy.
+
 ## Candidate Intake
 
 Candidate NDJSON is an audit handoff, not a provider request log. It accepts
