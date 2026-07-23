@@ -20,7 +20,12 @@ from crypto_address_identity.audit import (
     seed_official_calibration_candidates,
 )
 from crypto_address_identity.candidates import CandidateInput, CandidateService
-from crypto_address_identity.consumers.quant_crypto_btc import IdentityEnricher, replay_events
+from crypto_address_identity.consumers.quant_crypto_btc import (
+    IdentityEnricher,
+    replay_events,
+    replay_impact,
+)
+from crypto_address_identity.consumers.btc_whale_bilateral import replay_bilateral_whale_events
 from crypto_address_identity.core.config import Settings
 from crypto_address_identity.evidence import EvidenceInput, EvidenceService, VerifierRegistry
 from crypto_address_identity.exports import ResolverExporter
@@ -99,6 +104,16 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_show.add_argument("--address", required=True)
     resolve_show.add_argument("--assertion-type", default="entity_control")
     resolve_show.set_defaults(handler=_handle_resolve_show)
+    resolve_override = resolve_commands.add_parser("override")
+    resolve_override.add_argument("--chain", default="bitcoin")
+    resolve_override.add_argument("--address", required=True)
+    resolve_override.add_argument("--assertion-type", default="entity_control")
+    resolve_override.add_argument("--asserted-value", required=True)
+    resolve_override.add_argument("--decision", choices=("select", "reject"), required=True)
+    resolve_override.add_argument("--reviewer-ref", required=True)
+    resolve_override.add_argument("--reason-ref", required=True)
+    resolve_override.add_argument("--reviewed-at", required=True)
+    resolve_override.set_defaults(handler=_handle_resolve_override)
 
     export = commands.add_parser("export")
     export_commands = export.add_subparsers(dest="export_command", required=True)
@@ -138,7 +153,16 @@ def build_parser() -> argparse.ArgumentParser:
     replay_btc = replay_commands.add_parser("quant-crypto-btc")
     replay_btc.add_argument("--input", type=Path, required=True)
     replay_btc.add_argument("--snapshot", type=Path, required=True)
+    replay_btc.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="emit aggregate non-interference and coverage metrics without event records",
+    )
     replay_btc.set_defaults(handler=_handle_replay_btc)
+    replay_bilateral = replay_commands.add_parser("btc-whale-bilateral")
+    replay_bilateral.add_argument("--input", type=Path, action="append", required=True)
+    replay_bilateral.add_argument("--snapshot", type=Path, required=True)
+    replay_bilateral.set_defaults(handler=_handle_replay_btc_whale_bilateral)
     return parser
 
 
@@ -349,6 +373,23 @@ def _handle_resolve_show(arguments: argparse.Namespace) -> dict[str, Any]:
     return {"status": "ok", **asdict(result)}
 
 
+def _handle_resolve_override(arguments: argparse.Namespace) -> dict[str, Any]:
+    settings = Settings()
+    database = IdentityDatabase(settings.database_path)
+    database.migrate()
+    override_id = ResolverService(database).record_local_override(
+        chain_key=arguments.chain,
+        address=arguments.address,
+        assertion_type=arguments.assertion_type,
+        asserted_value=arguments.asserted_value,
+        decision=arguments.decision,
+        reviewer_ref=arguments.reviewer_ref,
+        reason_ref=arguments.reason_ref,
+        reviewed_at=arguments.reviewed_at,
+    )
+    return {"status": "ok", "override_id": override_id, "requires_rebuild": True}
+
+
 def _handle_export_resolver(arguments: argparse.Namespace) -> dict[str, Any]:
     settings = Settings()
     result = ResolverExporter(IdentityDatabase(settings.database_path), settings.export_root).export(
@@ -425,12 +466,30 @@ def _handle_audit_seed_provider_panel(arguments: argparse.Namespace) -> dict[str
 
 def _handle_replay_btc(arguments: argparse.Namespace) -> dict[str, Any]:
     events = _read_ndjson(arguments.input)
-    result = replay_events(events, IdentityEnricher.from_snapshot_directory(arguments.snapshot))
+    enricher = IdentityEnricher.from_snapshot_directory(arguments.snapshot)
+    result = replay_events(events, enricher)
+    impact = replay_impact(events, enricher)
+    output = {
+        "status": "ok",
+        "input_records": len(result.events),
+        "events": impact.events,
+        "changed_business_fields": result.changed_business_fields,
+        "impact": asdict(impact),
+    }
+    if not arguments.summary_only:
+        output["enriched_events"] = list(result.events)
+    return output
+
+
+def _handle_replay_btc_whale_bilateral(arguments: argparse.Namespace) -> dict[str, Any]:
+    events = [event for path in arguments.input for event in _read_ndjson(path)]
+    impact = replay_bilateral_whale_events(
+        events, IdentityEnricher.from_snapshot_directory(arguments.snapshot)
+    )
     return {
         "status": "ok",
-        "events": len(result.events),
-        "changed_business_fields": result.changed_business_fields,
-        "enriched_events": list(result.events),
+        "input_records": len(events),
+        "bilateral_impact": asdict(impact),
     }
 
 

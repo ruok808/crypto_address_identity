@@ -16,6 +16,11 @@ consumer's thresholds, cursor, quality gates, lake writes, or alert decisions.
 - Ethereum, BSC, Solana, and Zcash are schema placeholders only.
 - `quant_crypto` integration is read-only replay first and is a separate
   follow-up approval.
+- Resolver policy is explicit: an uncontested Tier C provider entity may be a
+  `provider_default`; append-only local corrections can select or reject an
+  existing evidenced value; unresolved disagreements remain `conflict_first`.
+- Identity replay never changes an existing alert, email, or suppression
+  action. It reports coverage and counterfactual limits instead.
 
 ## Local Checks
 

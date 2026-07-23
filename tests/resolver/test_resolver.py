@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
+
 from crypto_address_identity.evidence import EvidenceInput, EvidenceService, VerifierRegistry
 from crypto_address_identity.resolver import ResolverService, canonical_asserted_value
 from crypto_address_identity.storage.sqlite import IdentityDatabase
@@ -41,7 +43,7 @@ def _record(
     )
 
 
-def test_tier_c_only_resolves_to_discovery_only(runtime_root) -> None:
+def test_uncontested_tier_c_entity_resolves_as_provider_default(runtime_root) -> None:
     database = IdentityDatabase(runtime_root / "identity.sqlite3")
     database.migrate()
     EvidenceService(database, VerifierRegistry()).import_records([_record(entity_id="arkham:example")])
@@ -51,8 +53,10 @@ def test_tier_c_only_resolves_to_discovery_only(runtime_root) -> None:
 
     assert result.resolution_count == 1
     assert resolution.state == "resolved"
-    assert resolution.operational_tier == "discovery_only"
-    assert resolution.accepted_entity is None
+    assert resolution.operational_tier == "lookup_usable"
+    assert resolution.resolution_policy == "provider_default"
+    assert resolution.accepted_entity == "arkham:example"
+    assert resolution.accepted_entity_display == "arkham example"
 
 
 def test_conflicting_claims_resolve_to_ambiguous_not_a_winner(runtime_root) -> None:
@@ -71,8 +75,92 @@ def test_conflicting_claims_resolve_to_ambiguous_not_a_winner(runtime_root) -> N
 
     assert resolution.state == "ambiguous"
     assert resolution.operational_tier == "lookup_only"
+    assert resolution.resolution_policy == "conflict_first"
     assert resolution.conflict_set_id is not None
     assert resolution.accepted_entity is None
+
+
+def test_local_override_selects_a_supported_claim_without_erasing_the_conflict(runtime_root) -> None:
+    database = IdentityDatabase(runtime_root / "identity.sqlite3")
+    database.migrate()
+    evidence = EvidenceService(database, VerifierRegistry())
+    provider = _record(entity_id="arkham:gemini", source_suffix="provider")
+    provider = provider.model_copy(update={"candidate_entity_name": "Gemini"})
+    local_correction = _record(
+        entity_id="local:okx",
+        source_authority="local_inference",
+        source_suffix="local-correction",
+    )
+    local_correction = local_correction.model_copy(update={"candidate_entity_name": "OKX"})
+    evidence.import_records([provider, local_correction])
+    resolver = ResolverService(database)
+
+    resolver.rebuild(as_of="2026-07-22T01:00:00Z")
+    assert resolver.show("bitcoin", BTC_ADDRESS).state == "ambiguous"
+    override_id = resolver.record_local_override(
+        chain_key="bitcoin",
+        address=BTC_ADDRESS,
+        assertion_type="entity_control",
+        asserted_value=canonical_asserted_value(local_correction),
+        decision="select",
+        reviewer_ref="fixture-local-review",
+        reason_ref="https://example.test/local-correction",
+        reviewed_at="2026-07-22T02:00:00Z",
+    )
+
+    resolver.rebuild(as_of="2026-07-22T03:00:00Z")
+    resolution = resolver.show("bitcoin", BTC_ADDRESS)
+
+    assert override_id
+    assert resolution.state == "resolved"
+    assert resolution.operational_tier == "lookup_usable"
+    assert resolution.resolution_policy == "local_override"
+    assert resolution.accepted_entity == "local:okx"
+    assert resolution.accepted_entity_display == "OKX"
+    assert resolution.conflict_set_id is not None
+
+
+def test_local_override_rejection_removes_only_the_rejected_provider_claim(runtime_root) -> None:
+    database = IdentityDatabase(runtime_root / "identity.sqlite3")
+    database.migrate()
+    provider = _record(entity_id="arkham:gemini")
+    EvidenceService(database, VerifierRegistry()).import_records([provider])
+    resolver = ResolverService(database)
+    resolver.record_local_override(
+        chain_key="bitcoin",
+        address=BTC_ADDRESS,
+        assertion_type="entity_control",
+        asserted_value=canonical_asserted_value(provider),
+        decision="reject",
+        reviewer_ref="fixture-local-review",
+        reason_ref="https://example.test/rejection",
+        reviewed_at="2026-07-22T01:00:00Z",
+    )
+
+    resolver.rebuild(as_of="2026-07-22T02:00:00Z")
+    resolution = resolver.show("bitcoin", BTC_ADDRESS)
+
+    assert resolution.state == "unattributed"
+    assert resolution.operational_tier == "none"
+    assert resolution.resolution_policy == "local_override"
+
+
+def test_local_override_cannot_invent_an_unsupported_value(runtime_root) -> None:
+    database = IdentityDatabase(runtime_root / "identity.sqlite3")
+    database.migrate()
+    EvidenceService(database, VerifierRegistry()).import_records([_record(entity_id="arkham:gemini")])
+
+    with pytest.raises(ValueError, match="requires existing evidence"):
+        ResolverService(database).record_local_override(
+            chain_key="bitcoin",
+            address=BTC_ADDRESS,
+            assertion_type="entity_control",
+            asserted_value="unrecorded entity",
+            decision="select",
+            reviewer_ref="fixture-local-review",
+            reason_ref="https://example.test/unsupported",
+            reviewed_at="2026-07-22T01:00:00Z",
+        )
 
 
 def test_same_entity_name_from_different_source_ids_corroborates_one_claim(runtime_root) -> None:

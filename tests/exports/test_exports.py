@@ -50,8 +50,12 @@ def test_export_is_immutable_and_checksum_verifiable(runtime_root: Path) -> None
 
     assert result.resolution_count == 1
     assert len(result.manifest_sha256) == 64
+    assert snapshot.manifest["schema_version"] == "btc_identity_export_v2"
     assert snapshot.manifest["chain_key"] == "bitcoin"
-    assert snapshot.lookup("bitcoin", BTC_ADDRESS, "entity_control")["state"] == "resolved"
+    record = snapshot.lookup("bitcoin", BTC_ADDRESS, "entity_control")
+    assert record["state"] == "resolved"
+    assert record["resolution_policy"] == "provider_default"
+    assert record["resolved_entity_display"] == "Example"
 
 
 def test_corrupt_export_fails_checksum_validation(runtime_root: Path) -> None:

@@ -86,15 +86,34 @@ separately; they do not become entity-control or suppression evidence.
 - Tier A: valid cryptographic verifier output only.
 - Tier B: official/regulator artifact with explicit review before
   `lookup_usable`.
-- Tier C: 0xRouter/Arkham source observation. It stays
-  `unreviewed_external`.
+- Tier C: 0xRouter/Arkham source observation. A single active commercial
+  `entity_control` value with no competing active value resolves as
+  `provider_default`; generic address labels and tags remain discovery-only.
 - Tier D/E: public research or local heuristic corroboration/context.
 
 Every evidence row preserves source URL, artifact hash when applicable, license,
 independence group, timestamp, effective interval, and verification method.
-Different entity assertions for the same address form a conflict set. The
-resolver returns `ambiguous`; operators must not select a winner by source rank
-alone.
+Different entity assertions for the same address form a conflict set. An
+unresolved conflict always returns `ambiguous` with `resolution_policy`
+`conflict_first`; source ranking never chooses a winner. A local correction is
+an append-only, review-referenced `select` or `reject` decision over a value
+already represented in the evidence ledger. It cannot invent a new value,
+overwrite source evidence, or delete a conflict history. A selected value is
+returned as `local_override` and remains traceable to the underlying conflict.
+
+Record a correction only after importing the evidence that supports the selected
+or rejected value, then rebuild and export a new snapshot:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity resolve override \
+  --chain bitcoin --address <btc-address> --assertion-type entity_control \
+  --asserted-value '<canonical-value>' --decision select \
+  --reviewer-ref '<review-record>' --reason-ref 'https://evidence.example/reason' \
+  --reviewed-at 2026-07-23T00:00:00Z
+```
+
+The command creates an immutable override record; it does not rewrite a prior
+resolution or export. A following `resolve rebuild` is required.
 
 ## Snapshot Export and Consumer Replay
 
@@ -106,13 +125,56 @@ PYTHONPATH=src python -m crypto_address_identity export resolver --chain bitcoin
 ```
 
 The export contains `manifest.json`, `resolutions.ndjson`, and
-`evidence_summary.ndjson`. A consumer verifies every file checksum and pins a
-manifest hash. It does not follow a mutable latest pointer.
+`evidence_summary.ndjson`. Current resolver exports use the v2 record contract
+and include `resolution_policy`, resolved display values, and the canonical
+asserted value. A consumer verifies every file checksum and pins a manifest
+hash. It does not follow a mutable latest pointer.
 
 The BTC replay adapter is read-only. It adds identity caveat fields but must not
 change event ids, amounts, directions, thresholds, quality decisions, alert
 decisions, or ownership-semantics decisions. A real `quant_crypto` integration
 requires a separate implementation plan and approval.
+
+Use summary mode for production-derived data; it omits event records and reports
+only aggregate coverage and non-interference accounting:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity replay quant-crypto-btc \
+  --input sanitized-btc-whale-outbox.ndjson \
+  --snapshot data/exports/bitcoin/v2/<as-of> --summary-only
+```
+
+`mail_action_changes` and `suppression_action_changes` must remain zero. The
+historic BTC whale outbox stores output-side context, not the input-side address
+set required to recompute ownership semantics. Therefore its replay can measure
+output-address coverage, but cannot prove a hypothetical suppression is safe.
+For a privacy-minimized outbox audit, an input row may carry a positive integer
+`replay_weight`; aggregate counters are then weighted to the original alert
+population while no alert identifiers, transaction ids, or recipients enter the
+replay file.
+
+The bilateral whale replay accepts repeated `--input` paths, so a production
+derived fixture can be exported in bounded, non-overlapping time shards without
+creating a remote temporary file:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity replay btc-whale-bilateral \
+  --input sanitized-shard-a.ndjson --input sanitized-shard-b.ndjson \
+  --snapshot data/exports/bitcoin/v2/<as-of>
+```
+
+Its summary distinguishes two counterfactual classes without changing live
+delivery: `provider_default_suppression_candidates` require at least one
+provider-default side of a same-entity match, while
+`independent_evidence_suppression_candidates` require both sides to resolve
+through reviewed evidence or an append-only local override. Under the BTC
+identity policy, an uncontested `provider_default` is usable unless it is later
+falsified; independent/local evidence is a higher-confidence calibration path,
+not a prerequisite for a controlled suppression proposal. Any proposal still
+requires complete input context, the existing source-rule preconditions,
+`conflict_first` exclusion, and a durable audit outbox. The source
+delivery-status breakdown is an audit of possible email reduction, not itself
+an instruction to withhold a message.
 
 ## Raw Payload Retention
 
@@ -144,7 +206,8 @@ identity subject; it is not a wallet or UTXO ownership verifier.
 2. Use `cai audit coverage` to inspect safe outcome and evidence-tier counts.
 3. Verify raw payload object hash and resolver snapshot manifest before drawing
    a conclusion from a label.
-4. Keep conflicts as `ambiguous`; do not patch historical exports or consumer
-   rows manually.
+4. Keep unresolved conflicts as `ambiguous`; add a reviewed local override only
+   when it selects or rejects existing evidence, never by patching exports or
+   consumer rows manually.
 5. Escalate a plan to promote a label into monitor or suppression behavior to a
    separately reviewed consumer policy change.

@@ -28,7 +28,9 @@ class ResolutionView:
     assertion_type: str
     state: str
     operational_tier: str
+    resolution_policy: str
     accepted_entity: str | None
+    accepted_entity_display: str | None
     conflict_set_id: str | None
     resolution_version: str | None
     resolved_at: str | None
@@ -48,7 +50,7 @@ def canonical_asserted_value(record: EvidenceInput) -> str:
 
 
 class ResolverService:
-    """Materializes conservative point-in-time claim and resolution revisions."""
+    """Materializes policy-explicit point-in-time claim and resolution revisions."""
 
     def __init__(self, database: IdentityDatabase) -> None:
         self.database = database
@@ -111,9 +113,89 @@ class ResolverService:
             )
         return review_id
 
+    def record_local_override(
+        self,
+        *,
+        chain_key: str,
+        address: str,
+        assertion_type: str,
+        asserted_value: str,
+        decision: Literal["select", "reject"],
+        reviewer_ref: str,
+        reason_ref: str,
+        reviewed_at: str,
+    ) -> str:
+        """Append a local correction without deleting provider or official evidence.
+
+        A local correction can only select or reject a value that is already
+        supported by evidence for the subject. New assertions must enter through
+        the evidence ledger first, preserving their independent provenance.
+        """
+
+        if chain_key != "bitcoin":
+            raise ValueError("BTC-first resolver accepts only bitcoin overrides")
+        if decision not in {"select", "reject"}:
+            raise ValueError("local override decision must be select or reject")
+        value = asserted_value.strip().casefold()
+        if not value or not reviewer_ref.strip() or not reason_ref.strip():
+            raise ValueError("local override requires value, reviewer_ref, and reason_ref")
+        subject = normalize_bitcoin_address(address)
+        reviewed = _parse_utc(reviewed_at)
+        fingerprint = _hash_json(
+            {
+                "address_id": subject.address_id,
+                "assertion_type": assertion_type,
+                "asserted_value": value,
+                "decision": decision,
+                "reviewer_ref": reviewer_ref.strip(),
+                "reason_ref": reason_ref.strip(),
+                "reviewed_at": reviewed,
+            }
+        )
+        with self.database.write_transaction() as connection:
+            evidence_rows = connection.execute(
+                """
+                SELECT assertion_type, candidate_entity_id, candidate_entity_name, candidate_label,
+                       candidate_wallet_role
+                FROM identity_evidence
+                WHERE address_id = ? AND assertion_type = ? AND observed_at <= ?
+                """,
+                (subject.address_id, assertion_type, reviewed),
+            ).fetchall()
+            if not any(_canonical_asserted_value_from_row(row) == value for row in evidence_rows):
+                raise ValueError("local override value requires existing evidence")
+            existing = connection.execute(
+                "SELECT override_id FROM resolver_local_override WHERE override_fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+            if existing:
+                return existing["override_id"]
+            override_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO resolver_local_override (
+                    override_id, override_fingerprint, address_id, assertion_type,
+                    asserted_value, decision, reviewer_ref, reason_ref, reviewed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    override_id,
+                    fingerprint,
+                    subject.address_id,
+                    assertion_type,
+                    value,
+                    decision,
+                    reviewer_ref.strip(),
+                    reason_ref.strip(),
+                    reviewed,
+                    reviewed,
+                ),
+            )
+        return override_id
+
     def rebuild(self, *, as_of: str) -> RebuildResult:
         as_of_utc = _parse_utc(as_of)
-        version = f"btc_resolver_v1:{as_of_utc}"
+        version = f"btc_resolver_v2:{as_of_utc}"
         resolution_ids: list[str] = []
         with self.database.write_transaction() as connection:
             subjects = connection.execute(
@@ -144,7 +226,9 @@ class ResolverService:
                 assertion_type=assertion_type,
                 state="unsupported",
                 operational_tier="none",
+                resolution_policy="unsupported",
                 accepted_entity=None,
+                accepted_entity_display=None,
                 conflict_set_id=None,
                 resolution_version=None,
                 resolved_at=None,
@@ -170,20 +254,27 @@ class ResolverService:
                 assertion_type=assertion_type,
                 state="unattributed",
                 operational_tier="none",
+                resolution_policy="unattributed",
                 accepted_entity=None,
+                accepted_entity_display=None,
                 conflict_set_id=None,
                 resolution_version=None,
                 resolved_at=None,
                 freshness_status="unknown",
             )
         accepted_entity = row["entity_id"] if row["operational_tier"] == "lookup_usable" else None
+        accepted_entity_display = (
+            row["primary_entity_display"] if row["operational_tier"] == "lookup_usable" else None
+        )
         return ResolutionView(
             chain_key="bitcoin",
             normalized_address=subject.normalized_address,
             assertion_type=assertion_type,
             state=row["state"],
             operational_tier=row["operational_tier"],
+            resolution_policy=row["resolution_policy"],
             accepted_entity=accepted_entity,
+            accepted_entity_display=accepted_entity_display,
             conflict_set_id=row["conflict_set_id"],
             resolution_version=row["resolution_version"],
             resolved_at=row["resolved_at"],
@@ -215,17 +306,25 @@ class ResolverService:
                 continue
             groups[_canonical_asserted_value_from_row(row)].append(row)
 
-        active_claims = [
+        override_decisions = self._active_override_decisions(
+            connection,
+            address_id=address_id,
+            assertion_type=assertion_type,
+            as_of=as_of,
+        )
+        materialized_claims = [
             self._materialize_claim(
                 connection,
                 address_id=address_id,
                 assertion_type=assertion_type,
                 asserted_value=value,
                 evidence_rows=rows,
+                local_override_decision=override_decisions.get(value),
                 as_of=as_of,
             )
             for value, rows in sorted(groups.items())
         ]
+        active_claims = [claim for claim in materialized_claims if claim["claim_status"] != "rejected"]
         conflict_set_id = self._materialize_conflict(
             connection,
             address_id=address_id,
@@ -234,39 +333,69 @@ class ResolverService:
             as_of=as_of,
         )
 
+        selected_values = {
+            value for value, decision in override_decisions.items() if decision == "select"
+        }
+        selected_claims = [
+            claim for claim in active_claims if claim["asserted_value"] in selected_values
+        ]
+
         if not active_claims:
             state = "stale" if stale_rows else "unattributed"
             operational_tier = "none"
             primary_claim_id = None
-            freshness_status = "stale" if stale_rows else "unknown"
-        elif conflict_set_id is not None:
+            resolution_policy = "local_override" if override_decisions else "unattributed"
+            primary_entity_display = None
+            freshness_status = "stale" if stale_rows else (
+                "locally_rejected" if override_decisions else "unknown"
+            )
+        elif len(selected_claims) == 1:
+            claim = selected_claims[0]
+            state = "resolved"
+            operational_tier = "lookup_usable"
+            resolution_policy = "local_override"
+            primary_claim_id = claim["claim_id"]
+            primary_entity_display = _entity_display_for_assertion(
+                assertion_type, groups[claim["asserted_value"]]
+            )
+            freshness_status = "fresh"
+        elif conflict_set_id is not None or len(selected_claims) > 1:
             state = "ambiguous"
             operational_tier = "lookup_only"
+            resolution_policy = "conflict_first"
             primary_claim_id = None
+            primary_entity_display = None
             freshness_status = "conflicted"
         else:
             claim = active_claims[0]
             primary_claim_id = claim["claim_id"]
+            primary_entity_display = _entity_display_for_assertion(
+                assertion_type, groups[claim["asserted_value"]]
+            )
             if claim["claim_status"] == "accepted":
                 state = "resolved"
                 operational_tier = "lookup_usable"
-            elif claim["claim_status"] == "rejected":
-                state = "unattributed"
-                operational_tier = "none"
-                primary_claim_id = None
+                resolution_policy = "reviewed_evidence"
+            elif _is_provider_default(assertion_type, groups[claim["asserted_value"]]):
+                state = "resolved"
+                operational_tier = "lookup_usable"
+                resolution_policy = "provider_default"
             else:
                 state = "resolved"
                 operational_tier = "discovery_only"
+                resolution_policy = "unreviewed_evidence"
             freshness_status = "fresh"
 
-        candidate_ids = [claim["claim_id"] for claim in active_claims]
+        candidate_ids = [claim["claim_id"] for claim in materialized_claims]
         fingerprint = _hash_json(
             {
                 "address_id": address_id,
                 "assertion_type": assertion_type,
                 "state": state,
                 "operational_tier": operational_tier,
+                "resolution_policy": resolution_policy,
                 "primary_claim_id": primary_claim_id,
+                "primary_entity_display": primary_entity_display,
                 "candidate_claim_ids": candidate_ids,
                 "conflict_set_id": conflict_set_id,
                 "as_of": as_of,
@@ -287,8 +416,9 @@ class ResolverService:
             INSERT INTO identity_resolution (
                 resolution_id, resolution_fingerprint, address_id, assertion_type,
                 state, primary_claim_id, candidate_claim_ids_json, operational_tier,
-                conflict_set_id, resolved_at, resolution_version, freshness_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                conflict_set_id, resolved_at, resolution_version, freshness_status,
+                resolution_policy, primary_entity_display
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 resolution_id,
@@ -303,6 +433,8 @@ class ResolverService:
                 as_of,
                 resolution_version,
                 freshness_status,
+                resolution_policy,
+                primary_entity_display,
             ),
         )
         return resolution_id
@@ -315,6 +447,7 @@ class ResolverService:
         assertion_type: str,
         asserted_value: str,
         evidence_rows: list,
+        local_override_decision: str | None,
         as_of: str,
     ):
         review = connection.execute(
@@ -329,7 +462,9 @@ class ResolverService:
             (address_id, assertion_type, asserted_value, as_of),
         ).fetchone()
         tiers = {row["evidence_tier"] for row in evidence_rows}
-        if review and review["decision"] == "accept" and tiers & {"A", "B"}:
+        if local_override_decision == "reject":
+            claim_status = "rejected"
+        elif review and review["decision"] == "accept" and tiers & {"A", "B"}:
             claim_status = "accepted"
         elif review and review["decision"] == "reject":
             claim_status = "rejected"
@@ -343,6 +478,7 @@ class ResolverService:
                 "asserted_value": asserted_value,
                 "evidence_fingerprints": evidence_fingerprints,
                 "claim_status": claim_status,
+                "local_override_decision": local_override_decision,
                 "reviewed_at": review["reviewed_at"] if review else None,
             }
         )
@@ -395,6 +531,28 @@ class ResolverService:
             ),
         )
         return connection.execute("SELECT * FROM identity_claim WHERE claim_id = ?", (claim_id,)).fetchone()
+
+    @staticmethod
+    def _active_override_decisions(
+        connection,
+        *,
+        address_id: str,
+        assertion_type: str,
+        as_of: str,
+    ) -> dict[str, str]:
+        rows = connection.execute(
+            """
+            SELECT asserted_value, decision
+            FROM resolver_local_override
+            WHERE address_id = ? AND assertion_type = ? AND reviewed_at <= ?
+            ORDER BY reviewed_at DESC, override_id DESC
+            """,
+            (address_id, assertion_type, as_of),
+        ).fetchall()
+        decisions: dict[str, str] = {}
+        for row in rows:
+            decisions.setdefault(row["asserted_value"], row["decision"])
+        return decisions
 
     def _materialize_conflict(
         self,
@@ -507,13 +665,67 @@ def _tier_rank(tier: str) -> int:
 def _entity_id_for_assertion(assertion_type: str, evidence_rows: list) -> str | None:
     if assertion_type != "entity_control":
         return None
-    return next((row["candidate_entity_id"] for row in evidence_rows if row["candidate_entity_id"]), None)
+    return next(
+        (
+            row["candidate_entity_id"]
+            for row in _preferred_evidence_rows(evidence_rows)
+            if row["candidate_entity_id"]
+        ),
+        None,
+    )
 
 
 def _entity_name_for_assertion(assertion_type: str, evidence_rows: list) -> str | None:
     if assertion_type != "entity_control":
         return None
-    return next((row["candidate_entity_name"] for row in evidence_rows if row["candidate_entity_name"]), None)
+    return next(
+        (
+            row["candidate_entity_name"]
+            for row in _preferred_evidence_rows(evidence_rows)
+            if row["candidate_entity_name"]
+        ),
+        None,
+    )
+
+
+def _entity_display_for_assertion(assertion_type: str, evidence_rows: list) -> str | None:
+    if assertion_type != "entity_control":
+        return None
+    return _entity_name_for_assertion(assertion_type, evidence_rows)
+
+
+def _is_provider_default(assertion_type: str, evidence_rows: list) -> bool:
+    """Allow a single commercial entity assertion, but not generic provider tags.
+
+    Address labels and tags remain discovery evidence: their semantics are too
+    loose to stand in for an entity-control conclusion. A mixture with an
+    unreviewed official/local observation is also not a provider-default case;
+    that requires a review or an explicit local override.
+    """
+
+    return assertion_type == "entity_control" and bool(evidence_rows) and all(
+        row["source_authority"] == "commercial_provider" and row["evidence_tier"] == "C"
+        for row in evidence_rows
+    )
+
+
+def _preferred_evidence_rows(evidence_rows: list) -> list:
+    authority_rank = {
+        "local_inference": 0,
+        "official": 1,
+        "regulator": 1,
+        "commercial_provider": 2,
+        "public_explorer": 3,
+    }
+    return sorted(
+        evidence_rows,
+        key=lambda row: (
+            authority_rank.get(row["source_authority"], 9),
+            _tier_rank(row["evidence_tier"]),
+            row["observed_at"],
+            row["evidence_id"],
+        ),
+    )
 
 
 def _parse_utc(value: str) -> str:

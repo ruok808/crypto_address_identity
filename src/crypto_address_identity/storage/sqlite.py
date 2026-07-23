@@ -303,10 +303,48 @@ BEGIN
 END;
 """
 
+_MIGRATION_004_SQL = """
+CREATE TABLE resolver_local_override (
+    override_id TEXT PRIMARY KEY,
+    override_fingerprint TEXT NOT NULL UNIQUE,
+    address_id TEXT NOT NULL REFERENCES address_subject(address_id),
+    assertion_type TEXT NOT NULL,
+    asserted_value TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('select', 'reject')),
+    reviewer_ref TEXT NOT NULL,
+    reason_ref TEXT NOT NULL,
+    reviewed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX resolver_local_override_lookup ON resolver_local_override(
+    address_id, assertion_type, asserted_value, reviewed_at DESC
+);
+
+CREATE TRIGGER resolver_local_override_no_update
+BEFORE UPDATE ON resolver_local_override
+BEGIN
+    SELECT RAISE(ABORT, 'resolver_local_override is immutable');
+END;
+
+CREATE TRIGGER resolver_local_override_no_delete
+BEFORE DELETE ON resolver_local_override
+BEGIN
+    SELECT RAISE(ABORT, 'resolver_local_override is immutable');
+END;
+
+ALTER TABLE identity_resolution
+    ADD COLUMN resolution_policy TEXT NOT NULL DEFAULT 'legacy_conservative';
+
+ALTER TABLE identity_resolution
+    ADD COLUMN primary_entity_display TEXT;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration("001_initial_ledger", _MIGRATION_001_SQL),
     Migration("002_claim_review", _MIGRATION_002_SQL),
     Migration("003_append_only_identity", _MIGRATION_003_SQL),
+    Migration("004_provider_default_resolution", _MIGRATION_004_SQL),
 )
 
 

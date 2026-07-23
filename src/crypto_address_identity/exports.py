@@ -47,7 +47,7 @@ class ResolverExporter:
             "evidence_summary.ndjson": _ndjson_bytes(summaries),
         }
         manifest = {
-            "schema_version": "btc_identity_export_v1",
+            "schema_version": "btc_identity_export_v2",
             "chain_key": chain_key,
             "as_of": as_of_utc,
             "resolver_versions": sorted({record["resolution_version"] for record in records}),
@@ -60,7 +60,9 @@ class ResolverExporter:
         }
         manifest_bytes = _json_bytes(manifest)
         manifest_sha256 = _sha256(manifest_bytes)
-        relative_path = Path(chain_key) / _snapshot_name(as_of_utc)
+        # Resolver v2 adds a policy-bearing record contract. Keep the older
+        # v1 immutable exports valid instead of colliding with them by date.
+        relative_path = Path(chain_key) / "v2" / _snapshot_name(as_of_utc)
         directory = self.root / relative_path
         result = ExportResult(
             snapshot_id=None,
@@ -143,6 +145,13 @@ class ResolverExporter:
                     "accepted_entity": row["entity_id"]
                     if row["operational_tier"] == "lookup_usable"
                     else None,
+                    "resolved_entity_display": row["primary_entity_display"]
+                    if row["operational_tier"] == "lookup_usable"
+                    else None,
+                    "resolved_asserted_value": row["primary_asserted_value"]
+                    if row["operational_tier"] == "lookup_usable"
+                    else None,
+                    "resolution_policy": row["resolution_policy"],
                     "entity_candidates": candidate_entities,
                     "wallet_role_candidates": [],
                     "conflict_set_id": row["conflict_set_id"],
@@ -219,7 +228,7 @@ class ResolverExporter:
                 INSERT INTO resolver_snapshot (
                     snapshot_id, chain_key, resolver_version, as_of, relative_path,
                     manifest_sha256, resolution_count, evidence_summary_count, created_at
-                ) VALUES (?, ?, 'btc_resolver_v1', ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, 'btc_resolver_v2', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot_id,
@@ -254,7 +263,10 @@ class ResolverSnapshot:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("Resolver snapshot manifest is unavailable") from exc
-        if manifest.get("schema_version") != "btc_identity_export_v1":
+        if manifest.get("schema_version") not in {
+            "btc_identity_export_v1",
+            "btc_identity_export_v2",
+        }:
             raise ValueError("Resolver snapshot schema is unsupported")
         files = manifest.get("files")
         if not isinstance(files, dict):

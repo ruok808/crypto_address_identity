@@ -39,6 +39,7 @@ def test_migrate_creates_all_contract_tables(runtime_root) -> None:
         "conflict_set",
         "conflict_member",
         "identity_resolution",
+        "resolver_local_override",
         "resolver_snapshot",
     } <= tables
     assert dict((row["chain_key"], row["enabled"]) for row in chains)["bitcoin"] == 1

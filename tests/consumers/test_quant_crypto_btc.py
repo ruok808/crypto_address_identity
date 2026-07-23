@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from crypto_address_identity.consumers.quant_crypto_btc import IdentityEnricher, replay_events
+from crypto_address_identity.consumers.quant_crypto_btc import IdentityEnricher, replay_events, replay_impact
 from crypto_address_identity.evidence import EvidenceInput, EvidenceService, VerifierRegistry
 from crypto_address_identity.exports import ResolverExporter
 from crypto_address_identity.resolver import ResolverService
@@ -48,8 +48,9 @@ def test_enricher_returns_identity_caveat_without_business_action(runtime_root: 
 
     assert lookup.identity_lookup_status == "found"
     assert lookup.identity_state == "resolved"
-    assert lookup.identity_operational_tier == "discovery_only"
-    assert lookup.identity_entity_display is None
+    assert lookup.identity_operational_tier == "lookup_usable"
+    assert lookup.identity_entity_display == "Example"
+    assert lookup.identity_resolution_policy == "provider_default"
 
 
 def test_invalid_snapshot_becomes_a_caveat_not_a_crash(runtime_root: Path) -> None:
@@ -90,3 +91,62 @@ def test_replay_preserves_existing_btc_business_decisions(runtime_root: Path) ->
         assert enriched[key] == event[key]
     assert enriched["identity_lookup_status"] == "found"
     assert enriched["identity_state"] == "resolved"
+
+
+def test_replay_impact_reports_provider_default_coverage_without_changing_mail_actions(runtime_root: Path) -> None:
+    enricher = IdentityEnricher.from_snapshot_directory(_snapshot(runtime_root))
+    events = [
+        {
+            "event_id": "bitcoin:fixture:internal",
+            "output_address": BTC_ADDRESS,
+            "amount_btc": "800.00000000",
+            "semantic_decision": "internal_candidate",
+            "alert_decision": "send",
+            "notification_action": "send_now_with_caveat",
+            "status": "sent",
+            "ownership_semantics": "internal_candidate",
+        },
+        {
+            "event_id": "bitcoin:fixture:external",
+            "output_address": BTC_ADDRESS,
+            "amount_btc": "500.00000000",
+            "semantic_decision": "immediate_alert",
+            "alert_decision": "send",
+            "notification_action": "send_now",
+            "status": "sent",
+            "ownership_semantics": "immediate_alert",
+        },
+    ]
+
+    impact = replay_impact(events, enricher)
+
+    assert impact.events == 2
+    assert impact.changed_business_fields == 0
+    assert impact.mail_action_changes == 0
+    assert impact.suppression_action_changes == 0
+    assert impact.internal_candidate_events == 1
+    assert impact.internal_candidate_provider_default_events == 1
+    assert impact.resolution_policy_counts == {"provider_default": 2}
+
+
+def test_replay_impact_uses_sanitized_aggregate_weight_without_changing_actions(runtime_root: Path) -> None:
+    enricher = IdentityEnricher.from_snapshot_directory(_snapshot(runtime_root))
+
+    impact = replay_impact(
+        [
+            {
+                "output_address": BTC_ADDRESS,
+                "semantic_decision": "internal_candidate",
+                "notification_action": "send_now_with_caveat",
+                "status": "sent",
+                "replay_weight": 3,
+            }
+        ],
+        enricher,
+    )
+
+    assert impact.events == 3
+    assert impact.internal_candidate_events == 3
+    assert impact.internal_candidate_provider_default_events == 3
+    assert impact.mail_action_changes == 0
+    assert impact.suppression_action_changes == 0
