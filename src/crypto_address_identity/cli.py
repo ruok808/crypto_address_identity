@@ -15,7 +15,10 @@ import httpx
 from pydantic import ValidationError
 
 from crypto_address_identity import __version__
-from crypto_address_identity.audit import build_provider_reliability_panel
+from crypto_address_identity.audit import (
+    build_provider_reliability_panel,
+    seed_official_calibration_candidates,
+)
 from crypto_address_identity.candidates import CandidateInput, CandidateService
 from crypto_address_identity.consumers.quant_crypto_btc import IdentityEnricher, replay_events
 from crypto_address_identity.core.config import Settings
@@ -65,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_run.add_argument("--dry-run", action="store_true")
     fetch_run.add_argument("--limit", type=int, default=100)
     fetch_run.add_argument("--profile", choices=("auto", "discovery"), default="auto")
+    fetch_run.add_argument("--source-reference-prefix")
     fetch_run.set_defaults(handler=_handle_fetch_run)
 
     evidence = commands.add_parser("evidence")
@@ -113,7 +117,21 @@ def build_parser() -> argparse.ArgumentParser:
     audit_coverage.set_defaults(handler=_handle_audit_coverage)
     audit_provider_panel = audit_commands.add_parser("provider-panel")
     audit_provider_panel.add_argument("--source-reference-prefix", required=True)
+    audit_provider_panel.add_argument(
+        "--official-evidence-tier",
+        action="append",
+        choices=("A", "B", "C", "D", "E"),
+        dest="official_evidence_tiers",
+    )
+    audit_provider_panel.add_argument("--official-independence-group")
     audit_provider_panel.set_defaults(handler=_handle_audit_provider_panel)
+    audit_seed_provider_panel = audit_commands.add_parser("seed-provider-panel")
+    audit_seed_provider_panel.add_argument("--official-independence-group", required=True)
+    audit_seed_provider_panel.add_argument("--source-reference", required=True)
+    audit_seed_provider_panel.add_argument("--requested-at", required=True)
+    audit_seed_provider_panel.add_argument("--priority", type=int, default=70)
+    audit_seed_provider_panel.add_argument("--dry-run", action="store_true")
+    audit_seed_provider_panel.set_defaults(handler=_handle_audit_seed_provider_panel)
 
     replay = commands.add_parser("replay")
     replay_commands = replay.add_subparsers(dest="replay_command", required=True)
@@ -187,6 +205,7 @@ def _handle_fetch_run(arguments: argparse.Namespace) -> dict[str, Any]:
                 profile_override=(
                     ProviderProfile.DISCOVERY if arguments.profile == "discovery" else None
                 ),
+                source_reference_prefix=arguments.source_reference_prefix,
             )
         )
         result["profile_override"] = arguments.profile
@@ -380,7 +399,28 @@ def _handle_audit_provider_panel(arguments: argparse.Namespace) -> dict[str, Any
     return build_provider_reliability_panel(
         IdentityDatabase(settings.database_path),
         source_reference_prefix=arguments.source_reference_prefix,
+        official_evidence_tiers=tuple(arguments.official_evidence_tiers or ("A",)),
+        official_independence_group=arguments.official_independence_group,
     )
+
+
+def _handle_audit_seed_provider_panel(arguments: argparse.Namespace) -> dict[str, Any]:
+    requested_at = _parse_utc_datetime(arguments.requested_at)
+    settings = Settings()
+    database = IdentityDatabase(settings.database_path)
+    database.migrate()
+    result = seed_official_calibration_candidates(
+        database,
+        independence_group=arguments.official_independence_group,
+        source_reference=arguments.source_reference,
+        requested_at=requested_at,
+        priority=arguments.priority,
+        dry_run=arguments.dry_run,
+    )
+    return {
+        "status": "dry_run" if arguments.dry_run else "ok",
+        **asdict(result),
+    }
 
 
 def _handle_replay_btc(arguments: argparse.Namespace) -> dict[str, Any]:

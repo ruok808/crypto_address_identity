@@ -3,20 +3,124 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
+from crypto_address_identity.candidates import CandidateInput, CandidateService
 from crypto_address_identity.storage.sqlite import IdentityDatabase
 
 
+_SUPPORTED_OFFICIAL_TIERS = frozenset({"A", "B", "C", "D", "E"})
+
+
+@dataclass(frozen=True)
+class CalibrationSeedResult:
+    """Result for a reproducible, source-scoped provider calibration intake."""
+
+    independence_group: str
+    source_reference: str
+    eligible_address_count: int
+    evidence_tiers: tuple[str, ...]
+    imported_count: int
+    dry_run: bool
+
+
+def seed_official_calibration_candidates(
+    database: IdentityDatabase,
+    *,
+    independence_group: str,
+    source_reference: str,
+    requested_at: datetime,
+    priority: int = 70,
+    dry_run: bool = False,
+) -> CalibrationSeedResult:
+    """Queue valid, current official entity evidence as discovery-only samples.
+
+    This preserves the selected official source group in candidate provenance.
+    It intentionally creates neither a claim review nor a consumer-facing
+    operational decision.
+    """
+
+    group = independence_group.strip()
+    reference = source_reference.strip()
+    if not group or not reference:
+        raise ValueError("independence_group and source_reference are required")
+    if priority < 0 or priority > 100:
+        raise ValueError("priority must be between 0 and 100")
+    if requested_at.tzinfo is None:
+        raise ValueError("requested_at must be timezone-aware")
+    timestamp = requested_at.astimezone(UTC)
+
+    with database.read_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT a.normalized_address, ie.evidence_tier
+            FROM identity_evidence AS ie
+            JOIN address_subject AS a ON a.address_id = ie.address_id
+            WHERE ie.source_authority IN ('official', 'regulator')
+              AND ie.evidence_status = 'valid'
+              AND ie.assertion_type = 'entity_control'
+              AND ie.independence_group = ?
+              AND (ie.expires_at IS NULL OR ie.expires_at > ?)
+            ORDER BY a.normalized_address
+            """,
+            (group, _format_utc(timestamp)),
+        ).fetchall()
+
+    addresses = tuple(sorted({str(row["normalized_address"]) for row in rows}))
+    tiers = tuple(sorted({str(row["evidence_tier"]) for row in rows}))
+    if dry_run or not rows:
+        return CalibrationSeedResult(
+            independence_group=group,
+            source_reference=reference,
+            eligible_address_count=len(addresses),
+            evidence_tiers=tiers,
+            imported_count=0,
+            dry_run=dry_run,
+        )
+
+    candidates = [
+        CandidateInput(
+            chain_key="bitcoin",
+            address=address,
+            reason="official_evidence",
+            priority=priority,
+            source_reference=reference,
+            requested_at=timestamp,
+        )
+        for address in addresses
+    ]
+    result = CandidateService(database).import_candidates(candidates, created_at=timestamp)
+    return CalibrationSeedResult(
+        independence_group=group,
+        source_reference=reference,
+        eligible_address_count=len(addresses),
+        evidence_tiers=tiers,
+        imported_count=result.imported_count,
+        dry_run=False,
+    )
+
+
 def build_provider_reliability_panel(
-    database: IdentityDatabase, *, source_reference_prefix: str
+    database: IdentityDatabase,
+    *,
+    source_reference_prefix: str,
+    official_evidence_tiers: tuple[str, ...] = ("A",),
+    official_independence_group: str | None = None,
 ) -> dict[str, Any]:
     """Summarize a bounded provider sample without exposing addresses or raw data.
 
     An entity match or conflict is counted only where the exact address also
-    has independent Tier-A entity-control evidence. Unlabelled historical
-    addresses therefore contribute coverage metrics, never a precision claim.
+    has independent official entity-control evidence in the explicitly selected
+    evidence tier(s) and source group. Unlabelled historical addresses therefore
+    contribute coverage metrics, never a precision claim.
     """
+
+    tiers = _validated_tiers(official_evidence_tiers)
+    group = official_independence_group.strip() if official_independence_group else None
+    if official_independence_group is not None and not group:
+        raise ValueError("official_independence_group must not be empty")
 
     with database.read_connection() as connection:
         candidate_rows = connection.execute(
@@ -43,7 +147,7 @@ def build_provider_reliability_panel(
             """
             SELECT address_id, assertion_type, candidate_entity_name, candidate_label,
                    candidate_wallet_role, provider_tag_id, source_authority, evidence_tier,
-                   evidence_status
+                   evidence_status, independence_group
             FROM identity_evidence
             WHERE evidence_status = 'valid'
             """
@@ -78,7 +182,8 @@ def build_provider_reliability_panel(
                 provider_roles[address_id].add(str(row["candidate_wallet_role"]))
         if (
             row["source_authority"] in {"official", "regulator"}
-            and row["evidence_tier"] == "A"
+            and row["evidence_tier"] in tiers
+            and (group is None or row["independence_group"] == group)
             and row["assertion_type"] == "entity_control"
             and row["candidate_entity_name"]
         ):
@@ -142,6 +247,8 @@ def build_provider_reliability_panel(
     return {
         "status": "ok",
         "source_reference_prefix": source_reference_prefix,
+        "official_evidence_tiers": sorted(tiers),
+        "official_independence_group": group,
         "candidate_addresses": len(candidate_rows),
         "provider_outcome_counts": dict(sorted(outcome_counts.items())),
         "entity_name_supported_count": entity_supported,
@@ -159,8 +266,11 @@ def build_provider_reliability_panel(
         "strata": {key: dict(sorted(value.items())) for key, value in sorted(stratum_counts.items())},
         "interpretation": {
             "provider_entity_precision_supported": comparable > 0,
+            "provider_entity_precision_passed": comparable > 0 and entity_conflict == 0,
             "provider_wallet_role_precision_supported": False,
             "historical_coverage_is_not_entity_ground_truth": True,
+            "official_comparison_basis": _comparison_basis(tiers),
+            "signature_verified_reference": "A" in tiers,
         },
     }
 
@@ -172,3 +282,22 @@ def _canonical(value: object) -> str:
 def _stratum(source_reference: object) -> str:
     text = str(source_reference)
     return text.rsplit(":", 1)[-1] if ":" in text else "unspecified"
+
+
+def _validated_tiers(values: tuple[str, ...]) -> frozenset[str]:
+    tiers = frozenset(str(value).upper() for value in values)
+    if not tiers or not tiers.issubset(_SUPPORTED_OFFICIAL_TIERS):
+        raise ValueError("official_evidence_tiers must contain supported evidence tiers")
+    return tiers
+
+
+def _comparison_basis(tiers: frozenset[str]) -> str:
+    if tiers == {"A"}:
+        return "tier_a_cryptographic_proof"
+    if tiers == {"B"}:
+        return "tier_b_direct_publication"
+    return "explicit_official_evidence_tiers"
+
+
+def _format_utc(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")

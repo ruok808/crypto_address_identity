@@ -18,6 +18,13 @@ describes how a customer proves control of a self-hosted address. It is not a
 disclosure of a Gemini-owned Bitcoin address or a signature by Gemini for a
 custody address.
 
+A later SEC-filed Gemini Space Station securities-purchase agreement does
+state that a `Company Wallet` is owned and controlled by Gemini (or its
+custodian), but its public closing schedule redacts the actual wallet address
+as `[***]`. It is therefore useful corroboration that Gemini has corporate BTC
+wallet operations, but it is not address-level evidence and cannot resolve an
+Arkham label. See the [SEC exhibit](https://www.sec.gov/Archives/edgar/data/2055592/000205559226000048/gemini-spamay2026exhibit.htm).
+
 VanEck's [HODL FAQ](https://www.vaneck.com/us/en/investments/bitcoin-etf-hodl/hodl-faq.pdf)
 identifies Gemini Trust Company and Coinbase Custody as custodians, and the
 [SEC-filed Gemini Clearing Agreement](https://www.sec.gov/Archives/edgar/data/1838028/000093041324000044/c106800_ex10-9.htm)

@@ -143,21 +143,54 @@ class CandidateService:
                 )
         return CandidateImportResult(len(request_ids), tuple(request_ids))
 
-    def select_candidates(self, *, limit: int) -> tuple[SelectedCandidate, ...]:
+    def select_candidates(
+        self,
+        *,
+        limit: int,
+        source_reference_prefix: str | None = None,
+        fresh_discovery_after: datetime | None = None,
+    ) -> tuple[SelectedCandidate, ...]:
         if limit < 1:
             raise ValueError("limit must be positive")
+        prefix = source_reference_prefix.strip() if source_reference_prefix else None
+        if source_reference_prefix is not None and not prefix:
+            raise ValueError("source_reference_prefix must not be empty")
+        if fresh_discovery_after is not None and fresh_discovery_after.tzinfo is None:
+            raise ValueError("fresh_discovery_after must be timezone-aware")
+        where_conditions: list[str] = []
+        parameters: list[object] = []
+        if prefix:
+            where_conditions.append("substr(cr.source_reference, 1, ?) = ?")
+            parameters.extend((len(prefix), prefix))
+        if fresh_discovery_after is not None:
+            where_conditions.append(
+                """
+                NOT EXISTS (
+                    SELECT 1 FROM source_observation AS observation
+                    WHERE observation.address_id = cr.address_id
+                      AND observation.source_id = '0xrouter'
+                      AND observation.query_profile = 'discovery'
+                      AND observation.outcome = 'success'
+                      AND observation.completed_at > ?
+                )
+                """
+            )
+            parameters.append(_as_utc_string(fresh_discovery_after))
+        where_clause = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
+        parameters.append(limit)
         with self.database.read_connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT cr.candidate_request_id, cr.address_id, a.normalized_address,
                        cr.reason, cr.priority, cr.source_reference, cr.requested_at
                 FROM candidate_request AS cr
                 JOIN address_subject AS a ON a.address_id = cr.address_id
+                {where_clause}
                 ORDER BY cr.priority DESC, cr.requested_at ASC, cr.created_at ASC,
                          cr.candidate_request_id ASC
                 LIMIT ?
                 """,
-                (limit,),
+                tuple(parameters),
             ).fetchall()
         return tuple(
             SelectedCandidate(

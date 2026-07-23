@@ -15,16 +15,22 @@ from crypto_address_identity.storage.sqlite import IdentityDatabase
 
 
 BTC_ADDRESS = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+SECOND_BTC_ADDRESS = "3QJmV3qfvL9SuYo34YihAf3sRCW3qSinyC"
 
 
-def _candidate(priority: int = 80) -> CandidateInput:
+def _candidate(
+    priority: int = 80,
+    *,
+    address: str = BTC_ADDRESS,
+    source_reference: str = "fixture-event",
+) -> CandidateInput:
     return CandidateInput.model_validate(
         {
             "chain_key": "bitcoin",
-            "address": BTC_ADDRESS,
+            "address": address,
             "reason": "whale_counterparty",
             "priority": priority,
-            "source_reference": "fixture-event",
+            "source_reference": source_reference,
             "requested_at": "2026-07-22T00:00:00Z",
         }
     )
@@ -201,3 +207,69 @@ def test_repeated_candidate_provenance_does_not_duplicate_provider_request(runti
     assert calls == 1
     assert result.selected_count == 1
     assert result.duplicate_candidate_count == 1
+
+
+def test_source_reference_prefix_bounds_discovery_work(runtime_root, env_mapping) -> None:
+    database, service = _service(
+        runtime_root,
+        env_mapping,
+        lambda request: httpx.Response(200, content=json.dumps(_payload()).encode()),
+    )
+    CandidateService(database).import_candidates(
+        [
+            _candidate(
+                priority=95,
+                address=SECOND_BTC_ADDRESS,
+                source_reference="unrelated:high-priority",
+            ),
+            _candidate(source_reference="calibration:bitwise_bitb:2026-07-23"),
+        ]
+    )
+
+    result = service.run(
+        dry_run=True,
+        limit=10,
+        now=datetime(2026, 7, 23, tzinfo=UTC),
+        profile_override=ProviderProfile.DISCOVERY,
+        source_reference_prefix="calibration:bitwise_bitb:",
+    )
+
+    assert result.selected_count == 1
+    assert result.duplicate_candidate_count == 0
+
+
+def test_source_scoped_discovery_selects_next_unfresh_batch(runtime_root, env_mapping) -> None:
+    database, service = _service(
+        runtime_root,
+        env_mapping,
+        lambda request: httpx.Response(200, content=json.dumps(_payload()).encode()),
+    )
+    CandidateService(database).import_candidates(
+        [
+            _candidate(priority=80, source_reference="calibration:bitwise_bitb:2026-07-23"),
+            _candidate(
+                priority=70,
+                address=SECOND_BTC_ADDRESS,
+                source_reference="calibration:bitwise_bitb:2026-07-23",
+            ),
+        ]
+    )
+
+    first = service.run(
+        dry_run=False,
+        limit=1,
+        now=datetime(2026, 7, 23, tzinfo=UTC),
+        profile_override=ProviderProfile.DISCOVERY,
+        source_reference_prefix="calibration:bitwise_bitb:",
+    )
+    second = service.run(
+        dry_run=True,
+        limit=1,
+        now=datetime(2026, 7, 23, 1, tzinfo=UTC),
+        profile_override=ProviderProfile.DISCOVERY,
+        source_reference_prefix="calibration:bitwise_bitb:",
+    )
+
+    assert first.request_count == 1
+    assert second.selected_count == 1
+    assert second.skipped_fresh_count == 0

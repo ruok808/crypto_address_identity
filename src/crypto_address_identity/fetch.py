@@ -47,6 +47,7 @@ class FetchRunResult:
     outcome_counts: dict[str, int]
     evidence_count: int
     written_paths: tuple[str, ...]
+    source_reference_prefix: str | None
 
 
 class FetchService:
@@ -76,11 +77,21 @@ class FetchService:
         limit: int,
         now: datetime | None = None,
         profile_override: ProviderProfile | None = None,
+        source_reference_prefix: str | None = None,
     ) -> FetchRunResult:
         if limit < 1:
             raise ValueError("limit must be positive")
         observed_at = (now or datetime.now(UTC)).astimezone(UTC)
-        selected = self.candidates.select_candidates(limit=limit)
+        fresh_discovery_after = None
+        if source_reference_prefix and profile_override is ProviderProfile.DISCOVERY:
+            fresh_discovery_after = observed_at - timedelta(
+                hours=self.settings.discovery_ttl_hours
+            )
+        selected = self.candidates.select_candidates(
+            limit=limit,
+            source_reference_prefix=source_reference_prefix,
+            fresh_discovery_after=fresh_discovery_after,
+        )
         unique_selected: list[SelectedCandidate] = []
         duplicate_candidates: list[SelectedCandidate] = []
         seen_address_ids: set[str] = set()
@@ -116,6 +127,7 @@ class FetchService:
                 outcome_counts={},
                 evidence_count=0,
                 written_paths=(),
+                source_reference_prefix=source_reference_prefix,
             )
 
         run_id = self.quota.create_run(
@@ -233,6 +245,7 @@ class FetchService:
             outcome_counts=dict(outcomes),
             evidence_count=evidence_count,
             written_paths=tuple(written_paths),
+            source_reference_prefix=source_reference_prefix,
         )
 
     def _select_profile(self, candidate: SelectedCandidate, now: datetime) -> ProviderProfile | None:

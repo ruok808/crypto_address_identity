@@ -51,6 +51,36 @@ The configured gateway ceiling is 30 requests/minute. The service defaults to
 per run and includes received payload bytes. HTTP 429, timeout, or malformed
 payload records an outcome; it never becomes negative identity evidence.
 
+## Source-Scoped Calibration
+
+An official evidence set can be queued as a bounded provider-calibration panel
+without enrolling it in any consumer policy. Use a distinct source reference
+for each independent evidence group, then force the discovery profile:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity audit seed-provider-panel \
+  --official-independence-group okx_por \
+  --source-reference calibration:okx_por:YYYY-MM-DD \
+  --requested-at YYYY-MM-DDTHH:MM:SSZ --dry-run
+
+PYTHONPATH=src python -m crypto_address_identity fetch run --dry-run \
+  --profile discovery --limit 20 \
+  --source-reference-prefix calibration:okx_por:
+
+PYTHONPATH=src python -m crypto_address_identity audit provider-panel \
+  --source-reference-prefix calibration:okx_por: \
+  --official-evidence-tier A \
+  --official-independence-group okx_por
+```
+
+For a direct issuer-publication panel, declare Tier B explicitly rather than
+mixing it into signed-proof statistics. A source-scoped discovery run excludes
+addresses with a fresh discovery observation before selecting its next batch;
+this permits clean batches at the configured request ceiling. The panel reports
+entity-name agreement only at its selected evidence tier and source group.
+Provider address labels, product names, and wallet roles are reported
+separately; they do not become entity-control or suppression evidence.
+
 ## Evidence and Review
 
 - Tier A: valid cryptographic verifier output only.
