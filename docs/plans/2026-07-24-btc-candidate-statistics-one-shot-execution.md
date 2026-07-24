@@ -104,13 +104,13 @@ cai universe execute bigquery-candidate-statistics --execute-once ...
 - [x] Run Python compile checks and `git diff --check`.
 - [x] Review for no identifiers, no secrets, no retries, exclusive receipt
       semantics, and no materialization path.
-- [ ] Stage only this feature, run staged preflight, commit, fast-forward
+- [x] Stage only this feature, run staged preflight, commit, fast-forward
       `main`, and push exact reviewed code.
-- [ ] Re-run the live checkpoint/cost gate from exact `origin/main`; abort on
+- [x] Re-run the live checkpoint/cost gate from exact `origin/main`; abort on
       any checksum, cutoff, usage, or reserve drift.
-- [ ] Execute one authorized aggregate job and inspect the sanitized receipt.
-- [ ] Verify the same authorization id cannot submit a second job.
-- [ ] Decide the next phase:
+- [x] Execute one authorized aggregate job and inspect the sanitized receipt.
+- [x] Verify the same authorization id cannot submit a second job.
+- [x] Decide the next phase:
   - P0 `<=120,000` and coarse union `<=5,000,000`: design candidate
     materialization.
   - P0 `120,001..1,000,000`: rank in tiers before materialization.
