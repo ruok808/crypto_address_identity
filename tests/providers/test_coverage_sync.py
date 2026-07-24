@@ -276,6 +276,52 @@ def test_no_bitcoin_prediction_result_is_cached_without_marking_the_run_malforme
         ).fetchone()[0] == 1
 
 
+def test_incomplete_prediction_retries_before_new_discovery_entities(
+    env_mapping: dict[str, str]
+) -> None:
+    detail_requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/entity_balance_changes"):
+            return httpx.Response(
+                200,
+                json={"entities": [{"id": "fresh"}, {"id": "retry"}, {"id": "aaa-new"}]},
+            )
+        if "/entity/" in path and "/entity_predictions/" not in path:
+            entity_id = path.rsplit("/", 1)[-1]
+            detail_requests.append(entity_id)
+            return httpx.Response(200, json={"entity": {"id": entity_id}})
+        if "/entity_predictions/" in path:
+            entity_id = path.rsplit("/", 1)[-1]
+            if entity_id == "retry":
+                return httpx.Response(502, json={})
+            return httpx.Response(200, json=[])
+        return httpx.Response(404, json={})
+
+    database, service = _service(env_mapping, handler)
+    CoverageEntitySeedService(database).import_seeds(
+        [
+            CoverageEntitySeedInput.model_validate(
+                {
+                    "provider_entity_id": "retry",
+                    "priority": 90,
+                    "source_reference": "fixture:retry-priority",
+                    "requested_at": "2026-07-24T00:00:00Z",
+                }
+            )
+        ]
+    )
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    first = service.run(dry_run=False, entity_limit=2, now=now)
+    second = service.run(dry_run=False, entity_limit=1, now=now + timedelta(hours=1))
+
+    assert first.status == "partial"
+    assert second.entity_detail_requests == 1
+    assert second.prediction_requests == 1
+    assert detail_requests[-1] == "retry"
+
+
 def test_malformed_address_enrichment_does_not_enter_the_ttl_cache(env_mapping: dict[str, str]) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/entity_balance_changes"):

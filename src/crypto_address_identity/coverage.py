@@ -447,7 +447,7 @@ class CoverageSyncService:
         freshness_cutoff = _utc_string(now - timedelta(hours=self.settings.coverage_entity_ttl_hours))
         priority: dict[str, int] = {}
         with self.database.read_connection() as connection:
-            fresh_entities = {
+            fresh_detail_entities = {
                 row["provider_entity_id"]
                 for row in connection.execute(
                     """
@@ -468,7 +468,9 @@ class CoverageSyncService:
                     (freshness_cutoff,),
                 ).fetchall()
             }
-            fresh_entities &= fresh_prediction_entities
+            fresh_entities = fresh_detail_entities & fresh_prediction_entities
+            for entity_id in fresh_detail_entities - fresh_prediction_entities:
+                priority[entity_id] = 75
             for entity_id in extra_entity_ids:
                 if entity_id not in fresh_entities:
                     priority[entity_id] = max(priority.get(entity_id, 0), 50)
@@ -490,7 +492,7 @@ class CoverageSyncService:
                 """
             ).fetchall():
                 if row["provider_entity_id"] not in fresh_entities:
-                    priority.setdefault(row["provider_entity_id"], 50)
+                    priority.setdefault(row["provider_entity_id"], 75)
         return tuple(entity for entity, _ in sorted(priority.items(), key=lambda item: (-item[1], item[0]))[:limit])
 
     def _select_due_addresses(self, *, limit: int, now: datetime) -> tuple[CoverageAddressTarget, ...]:
