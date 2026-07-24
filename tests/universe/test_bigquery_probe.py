@@ -8,6 +8,7 @@ import pytest
 
 from crypto_address_identity.universe.bigquery import (
     BigQueryProbe,
+    GoogleBigQueryBackend,
     QueryEstimate,
     TableField,
     TableMetadata,
@@ -256,3 +257,30 @@ def test_bigquery_probe_blocks_estimate_above_cap() -> None:
     assert result.status == "blocked"
     assert result.blocking_reasons == ("bigquery_budget_exceeded",)
     assert result.dry_run_bytes == 1_001
+
+
+def test_google_backend_applies_byte_cap_only_to_executing_queries() -> None:
+    class FakeQueryJobConfig:
+        def __init__(self, **values: object) -> None:
+            self.maximum_bytes_billed: int | None = None
+            self.__dict__.update(values)
+
+    class FakeBigQueryModule:
+        QueryJobConfig = FakeQueryJobConfig
+
+    backend = object.__new__(GoogleBigQueryBackend)
+    backend._bigquery = FakeBigQueryModule()
+
+    dry_run_config = backend._query_job_config(
+        {},
+        maximum_bytes_billed=1_000,
+        dry_run=True,
+    )
+    execute_config = backend._query_job_config(
+        {},
+        maximum_bytes_billed=1_000,
+        dry_run=False,
+    )
+
+    assert dry_run_config.maximum_bytes_billed is None
+    assert execute_config.maximum_bytes_billed == 1_000

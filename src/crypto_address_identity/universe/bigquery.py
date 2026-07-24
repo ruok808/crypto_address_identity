@@ -472,7 +472,7 @@ class GoogleBigQueryBackend:
                 for name, value in sorted(parameters.items())
             ],
         )
-        if maximum_bytes_billed > 0:
+        if maximum_bytes_billed > 0 and not dry_run:
             job_config.maximum_bytes_billed = maximum_bytes_billed
         return job_config
 
