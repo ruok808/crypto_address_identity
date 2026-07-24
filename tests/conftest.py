@@ -18,6 +18,8 @@ def env_mapping(runtime_root: Path) -> dict[str, str]:
         "CAI_DATABASE_PATH": str(runtime_root / "identity.sqlite3"),
         "CAI_RAW_PAYLOAD_ROOT": str(runtime_root / "raw"),
         "CAI_EXPORT_ROOT": str(runtime_root / "exports"),
+        "CAI_UNIVERSE_ROOT": str(runtime_root / "universe"),
+        "CAI_UNIVERSE_DUCKDB_PATH": str(runtime_root / "universe" / "catalog.duckdb"),
         "CAI_ENABLED_CHAINS": "bitcoin",
         "CAI_0XROUTER_BASE_URL": "https://0xrouter.test",
         "CAI_0XROUTER_REQUESTS_PER_MINUTE": "20",
@@ -26,4 +28,9 @@ def env_mapping(runtime_root: Path) -> dict[str, str]:
         "CAI_DISCOVERY_TTL_HOURS": "168",
         "CAI_DETAIL_TTL_HOURS": "720",
         "CAI_MAX_DETAIL_CANDIDATES_PER_RUN": "5",
+        "CAI_BIGQUERY_BILLING_PROJECT": "fixture-project",
+        "CAI_BIGQUERY_MAXIMUM_BYTES_BILLED": "0",
+        "CAI_BITCOIN_RPC_URL": "http://127.0.0.1:8332",
+        "CAI_BITCOIN_RPC_COOKIE_FILE": str(runtime_root / "bitcoin.cookie"),
+        "CAI_BITCOIN_FINALITY_DEPTH": "6",
     }
