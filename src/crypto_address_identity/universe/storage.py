@@ -81,6 +81,7 @@ SOURCE_ACCOUNTING_SCHEMA = pa.schema(
         pa.field("empty_address_rows", pa.int64(), nullable=False),
         pa.field("multi_address_rows", pa.int64(), nullable=False),
         pa.field("nonstandard_rows", pa.int64(), nullable=False),
+        pa.field("missing_script_hex_rows", pa.int64(), nullable=False),
         pa.field("unmatched_input_rows", pa.int64(), nullable=False),
     ]
 )

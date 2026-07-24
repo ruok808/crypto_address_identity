@@ -67,6 +67,7 @@ ALL_COLUMNS = (
     "empty_address_rows",
     "multi_address_rows",
     "nonstandard_rows",
+    "missing_script_hex_rows",
     "unmatched_input_rows",
 )
 
@@ -109,6 +110,16 @@ def script_row(
 def accounting_row() -> dict[str, object]:
     return stream_row(
         "source_accounting", make_accounting(distinct_script_subjects=6).model_dump()
+    )
+
+
+def accounting_row_with(**updates: int) -> dict[str, object]:
+    return stream_row(
+        "source_accounting",
+        make_accounting(
+            distinct_script_subjects=6,
+            **updates,
+        ).model_dump(),
     )
 
 
@@ -278,6 +289,65 @@ def test_materializer_blocks_malformed_or_out_of_campaign_rows(
         ).run(request=materialization_request())
 
     assert not (tmp_path / "universe" / "campaigns" / "btc-20260724").exists()
+
+
+def test_materializer_blocks_complete_campaign_with_missing_raw_scripts(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBigQueryBackend(
+        dry_run_bytes=900,
+        result_batches=[
+            record_batch(
+                [
+                    feature_row(BTC_ADDRESSES[0]),
+                    script_row(BTC_ADDRESSES[0], index=0),
+                    accounting_row_with(missing_script_hex_rows=1),
+                ]
+            )
+        ],
+        total_bytes_processed=900,
+    )
+
+    with pytest.raises(FeatureMaterializationError):
+        BigQueryFeatureMaterializer(
+            backend=backend,
+            store=UniverseStore(tmp_path / "universe"),
+        ).run(request=materialization_request())
+
+    assert not (tmp_path / "universe" / "campaigns" / "btc-20260724").exists()
+
+
+def test_materializer_derives_canonical_address_type_from_valid_address(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBigQueryBackend(
+        dry_run_bytes=900,
+        result_batches=[
+            record_batch(
+                [
+                    raw_feature_row(
+                        BTC_ADDRESSES[0],
+                        address_type="pubkeyhash",
+                    ),
+                    script_row(BTC_ADDRESSES[0], index=0),
+                    accounting_row(),
+                ]
+            )
+        ],
+        total_bytes_processed=900,
+    )
+
+    result = BigQueryFeatureMaterializer(
+        backend=backend,
+        store=UniverseStore(tmp_path / "universe"),
+    ).run(request=materialization_request())
+    campaign = UniverseStore(tmp_path / "universe").load(result.campaign_id)
+
+    with campaign.open_duckdb() as connection:
+        address_type = connection.execute(
+            "SELECT address_type FROM universe_btc_address_feature"
+        ).fetchone()[0]
+    assert address_type == "p2pkh"
 
 
 @pytest.mark.parametrize("duplicate_kind", ["address", "script"])

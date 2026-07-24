@@ -9,6 +9,7 @@ from typing import Literal
 import pyarrow as pa
 from pydantic import Field, field_validator, model_validator
 
+from crypto_address_identity.chains.bitcoin import normalize_bitcoin_address
 from crypto_address_identity.universe.anchors import CalibrationAnchorSnapshot
 from crypto_address_identity.universe.bigquery import (
     BigQueryBackend,
@@ -203,9 +204,14 @@ class BigQueryFeatureMaterializer:
                     )
                 )
             elif row_kind == "address_feature":
-                feature = AddressFeatureRow.model_validate(
-                    _select_model_fields(row, AddressFeatureRow)
+                values = _select_model_fields(row, AddressFeatureRow)
+                subject = normalize_bitcoin_address(
+                    str(values["normalized_address"])
                 )
+                values["normalized_address"] = subject.normalized_address
+                values["address_id"] = subject.address_id
+                values["address_type"] = subject.address_type
+                feature = AddressFeatureRow.model_validate(values)
                 if feature.last_seen_height > source_manifest.cutoff_height:
                     raise FeatureMaterializationError(
                         "address feature exceeds campaign cutoff height"
@@ -216,11 +222,17 @@ class BigQueryFeatureMaterializer:
                     )
                 features.append(feature)
             elif row_kind == "source_accounting":
-                accounting.append(
-                    UniverseCoverageCounters.model_validate(
-                        _select_model_fields(row, UniverseCoverageCounters)
-                    )
+                counters = UniverseCoverageCounters.model_validate(
+                    _select_model_fields(row, UniverseCoverageCounters)
                 )
+                if (
+                    source_manifest.script_completeness
+                    and counters.missing_script_hex_rows
+                ):
+                    raise FeatureMaterializationError(
+                        "source accounting reports missing raw scripts"
+                    )
+                accounting.append(counters)
             else:
                 raise FeatureMaterializationError("BigQuery row_kind is invalid")
         return scripts, features, accounting

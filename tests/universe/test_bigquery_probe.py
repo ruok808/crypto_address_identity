@@ -94,6 +94,9 @@ def test_bigquery_query_plan_is_partition_bounded_and_deterministic() -> None:
     assert "@cutoff_height" in plan.address_features_sql
     assert "@window_365d_start" in plan.address_features_sql
     assert "bigquery-public-data.crypto_bitcoin.outputs" in plan.address_features_sql
+    assert "LOWER(script_hex) AS script_hex" in plan.address_features_sql
+    assert "LOWER(TO_HEX(" in plan.address_features_sql
+    assert "missing_script_hex_rows" in plan.address_features_sql
     assert "DATE_SUB(@as_of_date, INTERVAL 7 DAY)" in plan.source_checkpoint_sql
     assert "LIMIT 1" in plan.source_checkpoint_sql
     assert "fixture-project" not in plan.address_features_sql

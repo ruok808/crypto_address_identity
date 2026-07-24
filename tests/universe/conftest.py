@@ -104,6 +104,7 @@ def make_accounting(**updates: int) -> UniverseCoverageCounters:
         "empty_address_rows": 1,
         "multi_address_rows": 1,
         "nonstandard_rows": 1,
+        "missing_script_hex_rows": 0,
         "unmatched_input_rows": 0,
     }
     values.update(updates)

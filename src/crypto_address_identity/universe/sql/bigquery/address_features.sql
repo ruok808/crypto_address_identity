@@ -10,7 +10,7 @@ outputs_base AS (
     transaction_hash,
     transaction_index,
     `index` AS output_index,
-    script_hex,
+    LOWER(script_hex) AS script_hex,
     type AS script_type,
     addresses,
     CAST(value AS INT64) AS value_sats
@@ -147,7 +147,7 @@ same_tx_maximums AS (
 ),
 address_features AS (
   SELECT
-    TO_HEX(SHA256(CAST(CONCAT('bitcoin:', output.normalized_address) AS BYTES)))
+    LOWER(TO_HEX(SHA256(CAST(CONCAT('bitcoin:', output.normalized_address) AS BYTES))))
       AS address_id,
     output.normalized_address,
     output.address_type,
@@ -196,7 +196,7 @@ address_features AS (
 ),
 script_subjects AS (
   SELECT
-    TO_HEX(
+    LOWER(TO_HEX(
       SHA256(
         CONCAT(
           CAST('bitcoin:mainnet' AS BYTES),
@@ -204,18 +204,18 @@ script_subjects AS (
           FROM_HEX(COALESCE(script_hex, ''))
         )
       )
-    ) AS script_id,
+    )) AS script_id,
     COALESCE(script_hex, '') AS script_hex,
     ANY_VALUE(script_type) AS script_type,
     IF(ARRAY_LENGTH(ANY_VALUE(addresses)) = 1, ANY_VALUE(addresses)[OFFSET(0)], NULL)
       AS normalized_address,
     IF(
       ARRAY_LENGTH(ANY_VALUE(addresses)) = 1,
-      TO_HEX(
+      LOWER(TO_HEX(
         SHA256(
           CAST(CONCAT('bitcoin:', ANY_VALUE(addresses)[OFFSET(0)]) AS BYTES)
         )
-      ),
+      )),
       NULL
     ) AS address_id,
     ARRAY_LENGTH(ANY_VALUE(addresses)) = 1 AS provider_enrichable
@@ -233,8 +233,14 @@ source_accounting AS (
       AS empty_address_rows,
     (SELECT COUNT(*) FROM outputs_base WHERE ARRAY_LENGTH(addresses) > 1)
       AS multi_address_rows,
-    (SELECT COUNT(*) FROM outputs_base WHERE script_hex IS NULL OR script_hex = '')
+    (
+      SELECT COUNT(*)
+      FROM outputs_base
+      WHERE LOWER(COALESCE(script_type, '')) = 'nonstandard'
+    )
       AS nonstandard_rows,
+    (SELECT COUNT(*) FROM outputs_base WHERE script_hex IS NULL OR script_hex = '')
+      AS missing_script_hex_rows,
     (SELECT COUNT(*) FROM inputs_base WHERE value_sats IS NULL)
       AS unmatched_input_rows
 )
@@ -275,6 +281,7 @@ SELECT
   CAST(NULL AS INT64) AS empty_address_rows,
   CAST(NULL AS INT64) AS multi_address_rows,
   CAST(NULL AS INT64) AS nonstandard_rows,
+  CAST(NULL AS INT64) AS missing_script_hex_rows,
   CAST(NULL AS INT64) AS unmatched_input_rows
 FROM script_subjects
 UNION ALL
@@ -308,6 +315,7 @@ SELECT
   gross_flow_90d_sats,
   gross_flow_365d_sats,
   direct_large_counterparty_count,
+  NULL,
   NULL,
   NULL,
   NULL,
@@ -354,5 +362,6 @@ SELECT
   empty_address_rows,
   multi_address_rows,
   nonstandard_rows,
+  missing_script_hex_rows,
   unmatched_input_rows
 FROM source_accounting

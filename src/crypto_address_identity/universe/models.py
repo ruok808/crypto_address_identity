@@ -271,6 +271,7 @@ class UniverseCoverageCounters(UniverseModel):
     empty_address_rows: int = Field(default=0, ge=0)
     multi_address_rows: int = Field(default=0, ge=0)
     nonstandard_rows: int = Field(default=0, ge=0)
+    missing_script_hex_rows: int = Field(default=0, ge=0)
     unmatched_input_rows: int = Field(default=0, ge=0)
 
 
