@@ -18,6 +18,20 @@ from crypto_address_identity.universe.candidate_execution import (
     PINNED_CUTOFF_HEIGHT,
     PINNED_SOURCE_STANDARD_ADDRESS_COUNT,
 )
+from crypto_address_identity.universe.candidate_execution_v2 import (
+    CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
+    CANDIDATE_STATISTICS_V2_MAXIMUM_BYTES_BILLED,
+    PINNED_V2_CANDIDATE_QUERY_SHA256,
+    PINNED_V2_CANDIDATE_SCHEMA_SHA256,
+    PINNED_V2_DRY_RUN_BYTES,
+    PINNED_V2_MONTHLY_PROCESSING_BUDGET_BYTES,
+    PINNED_V2_MONTHLY_RESERVE_BYTES,
+)
+from crypto_address_identity.universe.candidate_statistics_v2 import (
+    PINNED_V2_CUTOFF_HEIGHT,
+    PINNED_V2_SOURCE_INPUT_ONLY_ADDRESS_COUNT,
+    PINNED_V2_SOURCE_STANDARD_ADDRESS_COUNT,
+)
 from crypto_address_identity.universe.features import FeatureMaterializationResult
 from crypto_address_identity.universe.models import SourceManifest, SourceProbeResult
 from crypto_address_identity.universe.query_plan import BigQueryQueryPlan
@@ -32,6 +46,12 @@ from tests.universe.test_bigquery_probe import table_metadata
 from tests.universe.test_candidate_execution import (
     PinnedTableMetadata,
     execution_result_row,
+)
+from tests.universe.test_candidate_execution_v2 import (
+    EXPECTED_MONTH_TO_DATE_BILLED_BYTES,
+    EXPECTED_SUCCESSFUL_QUERY_JOBS,
+    PinnedV2TableMetadata,
+    execution_result_row as execution_result_row_v2,
 )
 
 
@@ -128,6 +148,56 @@ class FakeCandidateExecutionBackend(FakeBigQueryBackend):
         )
 
 
+class FakeCandidateExecutionV2Backend(FakeBigQueryBackend):
+    def table_metadata(self, table_id: str) -> PinnedV2TableMetadata:
+        self.calls.append("table_metadata")
+        assert table_id.endswith(".transactions")
+        return PinnedV2TableMetadata()
+
+    def monthly_successful_query_usage(
+        self,
+        *,
+        month_start: datetime,
+        month_end: datetime,
+    ) -> MonthlyQueryUsage:
+        self.calls.append("monthly_successful_query_usage")
+        return MonthlyQueryUsage(
+            successful_query_jobs=EXPECTED_SUCCESSFUL_QUERY_JOBS,
+            total_bytes_billed=EXPECTED_MONTH_TO_DATE_BILLED_BYTES,
+        )
+
+    def dry_run(
+        self,
+        sql: str,
+        parameters: dict[str, object],
+        maximum_bytes_billed: int,
+    ) -> QueryEstimate:
+        self.calls.append("dry_run")
+        return QueryEstimate(
+            total_bytes_processed=PINNED_V2_DRY_RUN_BYTES,
+            cache_hit=False,
+        )
+
+    def execute_aggregate_at_most_two_no_retry(
+        self,
+        sql: str,
+        parameters: dict[str, object],
+        *,
+        maximum_bytes_billed: int,
+        job_id: str,
+    ) -> AggregateQueryExecution:
+        self.calls.append("execute_aggregate_at_most_two_no_retry")
+        assert maximum_bytes_billed == (
+            CANDIDATE_STATISTICS_V2_MAXIMUM_BYTES_BILLED
+        )
+        assert job_id.startswith("cai_btc_importance_v2_")
+        return AggregateQueryExecution(
+            rows=(execution_result_row_v2(),),
+            total_bytes_processed=PINNED_V2_DRY_RUN_BYTES,
+            total_bytes_billed=PINNED_V2_DRY_RUN_BYTES,
+        )
+
+
 class FakeBigQueryMaterializer:
     def __init__(self) -> None:
         self.requests = []
@@ -216,6 +286,42 @@ def _candidate_execution_arguments(mode: str) -> list[str]:
         "1099511627776",
         "--reserve-bytes",
         "250000000000",
+    ]
+
+
+def _candidate_execution_v2_arguments(mode: str) -> list[str]:
+    return [
+        "universe",
+        "execute",
+        "bigquery-candidate-statistics-v2",
+        mode,
+        "--authorization-id",
+        CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
+        "--acknowledge-billed-execution",
+        "--as-of-date",
+        "2026-07-24",
+        "--cutoff-height",
+        str(PINNED_V2_CUTOFF_HEIGHT),
+        "--expected-query-sha256",
+        PINNED_V2_CANDIDATE_QUERY_SHA256,
+        "--expected-schema-sha256",
+        PINNED_V2_CANDIDATE_SCHEMA_SHA256,
+        "--expected-source-address-count",
+        str(PINNED_V2_SOURCE_STANDARD_ADDRESS_COUNT),
+        "--expected-input-only-address-count",
+        str(PINNED_V2_SOURCE_INPUT_ONLY_ADDRESS_COUNT),
+        "--expected-dry-run-bytes",
+        str(PINNED_V2_DRY_RUN_BYTES),
+        "--expected-successful-query-jobs",
+        str(EXPECTED_SUCCESSFUL_QUERY_JOBS),
+        "--expected-month-to-date-billed-bytes",
+        str(EXPECTED_MONTH_TO_DATE_BILLED_BYTES),
+        "--maximum-bytes-billed",
+        str(CANDIDATE_STATISTICS_V2_MAXIMUM_BYTES_BILLED),
+        "--monthly-processing-budget-bytes",
+        str(PINNED_V2_MONTHLY_PROCESSING_BUDGET_BYTES),
+        "--reserve-bytes",
+        str(PINNED_V2_MONTHLY_RESERVE_BYTES),
     ]
 
 
@@ -703,6 +809,76 @@ def test_bigquery_candidate_statistics_executes_once_via_explicit_cli(
         "status": "error",
     }
     assert backend.calls.count("execute_aggregate_at_most_two_no_retry") == 1
+
+
+def test_bigquery_candidate_statistics_v2_execution_preview_is_offline(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: (_ for _ in ()).throw(
+            AssertionError("network boundary")
+        ),
+    )
+
+    exit_code = main(_candidate_execution_v2_arguments("--dry-run"))
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "dry_run"
+    assert output["billing_acknowledged"] is True
+    assert output["query_sha256"] == PINNED_V2_CANDIDATE_QUERY_SHA256
+    assert output["execution_calls"] == 0
+    assert output["automatic_retries"] == 0
+    assert output["candidate_materialized"] is False
+    assert output["written_paths"] == []
+    assert not (tmp_path / "universe").exists()
+
+
+def test_bigquery_candidate_statistics_v2_executes_once_via_cli(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    backend = FakeCandidateExecutionV2Backend()
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: backend,
+    )
+
+    exit_code = main(_candidate_execution_v2_arguments("--execute-once"))
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "completed"
+    assert output["row_count"] == 1
+    assert output["execution_calls"] == 1
+    assert output["automatic_retries"] == 0
+    assert output["candidate_materialized"] is False
+    assert len(output["written_paths"]) == 1
+    assert backend.calls == [
+        "table_metadata",
+        "monthly_successful_query_usage",
+        "dry_run",
+        "execute_aggregate_at_most_two_no_retry",
+    ]
+
+    second_exit_code = main(
+        _candidate_execution_v2_arguments("--execute-once")
+    )
+    second_output = _output(capsys)
+    assert second_exit_code == 2
+    assert second_output == {
+        "error_code": "candidate_v2_execution_already_attempted",
+        "status": "error",
+    }
+    assert backend.calls.count(
+        "execute_aggregate_at_most_two_no_retry"
+    ) == 1
 
 
 def test_bitcoin_core_execute_readonly_uses_injected_probe(

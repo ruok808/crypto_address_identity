@@ -73,6 +73,12 @@ from crypto_address_identity.universe.candidate_execution import (
     CandidateStatisticsOneShotExecutor,
     preview_candidate_statistics_execution,
 )
+from crypto_address_identity.universe.candidate_execution_v2 import (
+    CandidateStatisticsV2ExecutionAlreadyAttempted,
+    CandidateStatisticsV2ExecutionRequest,
+    CandidateStatisticsV2OneShotExecutor,
+    preview_candidate_statistics_v2_execution,
+)
 from crypto_address_identity.universe.features import (
     BigQueryFeatureMaterializer,
     BigQueryMaterializationRequest,
@@ -407,6 +413,90 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe_execute_candidate_statistics.set_defaults(
         handler=_handle_universe_execute_bigquery_candidate_statistics
+    )
+
+    universe_execute_candidate_statistics_v2 = (
+        universe_execute_commands.add_parser(
+            "bigquery-candidate-statistics-v2"
+        )
+    )
+    candidate_execution_v2_mode = (
+        universe_execute_candidate_statistics_v2.add_mutually_exclusive_group(
+            required=True
+        )
+    )
+    candidate_execution_v2_mode.add_argument("--dry-run", action="store_true")
+    candidate_execution_v2_mode.add_argument(
+        "--execute-once",
+        action="store_true",
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--authorization-id",
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--acknowledge-billed-execution",
+        action="store_true",
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--as-of-date",
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--cutoff-height",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-query-sha256",
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-schema-sha256",
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-source-address-count",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-input-only-address-count",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-dry-run-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-successful-query-jobs",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-month-to-date-billed-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--maximum-bytes-billed",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--monthly-processing-budget-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--reserve-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics_v2.set_defaults(
+        handler=_handle_universe_execute_bigquery_candidate_statistics_v2
     )
 
     universe_probe_bitcoin = universe_probe_commands.add_parser("bitcoin-core")
@@ -1089,6 +1179,61 @@ def _handle_universe_execute_bigquery_candidate_statistics(
             raise CliError(
                 "candidate execution authorization was already attempted",
                 error_code="candidate_execution_already_attempted",
+            ) from exc
+    return outcome.model_dump(mode="json")
+
+
+def _handle_universe_execute_bigquery_candidate_statistics_v2(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    request = CandidateStatisticsV2ExecutionRequest(
+        authorization_id=arguments.authorization_id,
+        billing_acknowledged=arguments.acknowledge_billed_execution,
+        as_of_date=_parse_date(arguments.as_of_date),
+        cutoff_height=arguments.cutoff_height,
+        expected_query_sha256=arguments.expected_query_sha256,
+        expected_schema_sha256=arguments.expected_schema_sha256,
+        expected_source_standard_address_count=(
+            arguments.expected_source_address_count
+        ),
+        expected_source_input_only_address_count=(
+            arguments.expected_input_only_address_count
+        ),
+        expected_dry_run_bytes=arguments.expected_dry_run_bytes,
+        expected_successful_query_jobs=(
+            arguments.expected_successful_query_jobs
+        ),
+        expected_month_to_date_billed_bytes=(
+            arguments.expected_month_to_date_billed_bytes
+        ),
+        maximum_bytes_billed=arguments.maximum_bytes_billed,
+        monthly_processing_budget_bytes=(
+            arguments.monthly_processing_budget_bytes
+        ),
+        reserve_bytes=arguments.reserve_bytes,
+    )
+    receipt_root = settings.universe_root / "executions"
+    if arguments.dry_run:
+        outcome = preview_candidate_statistics_v2_execution(
+            request,
+            dataset=settings.bigquery_dataset,
+            receipt_root=receipt_root,
+        )
+    else:
+        try:
+            outcome = CandidateStatisticsV2OneShotExecutor(
+                backend=_make_bigquery_backend(settings),
+                dataset=settings.bigquery_dataset,
+                receipt_root=receipt_root,
+                max_source_age=timedelta(
+                    hours=settings.universe_max_source_age_hours
+                ),
+            ).run(request)
+        except CandidateStatisticsV2ExecutionAlreadyAttempted as exc:
+            raise CliError(
+                "candidate v2 execution authorization was already attempted",
+                error_code="candidate_v2_execution_already_attempted",
             ) from exc
     return outcome.model_dump(mode="json")
 

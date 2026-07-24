@@ -169,10 +169,39 @@ transaction-table metadata read, one current-month successful-job usage read,
 and one free BigQuery dry run. Both modes report zero provider requests and
 zero written paths.
 
-There is deliberately no v2 `execute`, `execute-once`, destination-table,
-address-export, or candidate-materialization command. A successful live dry
-run proves only that the fixed query compiles and reports an estimated byte
-cost. It does not return the v2 address counts.
+The probe remains dry-run-only. A separate one-shot execution boundary exists
+for the reviewed billed census:
+
+```bash
+cai universe execute bigquery-candidate-statistics-v2 --dry-run \
+  --authorization-id btc-importance-v2-20260724-one-shot \
+  --acknowledge-billed-execution \
+  --as-of-date 2026-07-24 --cutoff-height 959187 \
+  --expected-query-sha256 47b0b8977cc1443578bc3daf3f90a2cf5e0e48ae758a4b7a133d3caa7d301e74 \
+  --expected-schema-sha256 7353193a75b43704d273b8bcfc4a0d4d56fc9cdc6623704bb25855a0f439dfb7 \
+  --expected-source-address-count 1557941780 \
+  --expected-input-only-address-count 3 \
+  --expected-dry-run-bytes 637999682243 \
+  --expected-successful-query-jobs REVIEWED_JOB_COUNT \
+  --expected-month-to-date-billed-bytes REVIEWED_BILLED_BYTES \
+  --maximum-bytes-billed 650000000000 \
+  --monthly-processing-budget-bytes 2000000000000 \
+  --reserve-bytes 250000000000
+```
+
+Replace `--dry-run` with `--execute-once` only after a fresh live probe reports
+the exact reviewed job count and month-to-date billed bytes. The request
+rejects every other authorization id, cutoff, checksum, baseline, dry-run
+estimate, query cap, monthly byte budget, or reserve. It creates an exclusive
+mode-0600 receipt before query submission, uses a deterministic job id, and
+sets both query and result retries to none. Any receipt permanently consumes
+the authorization, including `started`, `failed`, or `quality_blocked`.
+
+The one-shot command can return one identifier-free aggregate row only. It has
+no destination table, address export, provider call, candidate materialization,
+or consumer effect. A successful live dry run still proves only compilation
+and estimated cost; the census counts exist only after the separately reviewed
+one-shot execution.
 
 The v2 aggregate result contract, if separately authorized later, is pinned to
 cutoff height `959187`, standard output-address baseline `1,557,941,780`, and
