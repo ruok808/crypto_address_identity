@@ -517,3 +517,85 @@ def test_google_backend_sums_only_successful_monthly_query_jobs() -> None:
         "min_creation_time": month_start,
         "max_creation_time": month_end,
     }
+
+
+def test_google_backend_one_shot_aggregate_disables_all_retries() -> None:
+    class FakeQueryJobConfig:
+        def __init__(self, **arguments: object) -> None:
+            self.arguments = arguments
+            self.maximum_bytes_billed: int | None = None
+
+    class FakeScalarQueryParameter:
+        def __init__(self, name: str, parameter_type: str, value: object) -> None:
+            self.name = name
+            self.parameter_type = parameter_type
+            self.value = value
+
+    class FakeBigQueryModule:
+        QueryJobConfig = FakeQueryJobConfig
+        ScalarQueryParameter = FakeScalarQueryParameter
+
+    class FakeNestedRow:
+        def items(self):
+            return (("mask", 1), ("address_count", 2))
+
+    class FakeRow:
+        def items(self):
+            return (
+                ("contract_version", "btc_candidate_statistics_v1"),
+                ("p0_overlap_distribution", [FakeNestedRow()]),
+            )
+
+    class FakeJob:
+        total_bytes_processed = 637_999_682_243
+        total_bytes_billed = 637_999_682_243
+
+        def __init__(self) -> None:
+            self.result_arguments: dict[str, object] = {}
+
+        def result(self, **arguments: object) -> list[FakeRow]:
+            self.result_arguments = arguments
+            return [FakeRow()]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.query_arguments: dict[str, object] = {}
+            self.job = FakeJob()
+
+        def query(self, sql: str, **arguments: object) -> FakeJob:
+            assert sql == "SELECT aggregate_only"
+            self.query_arguments = arguments
+            return self.job
+
+    backend = object.__new__(GoogleBigQueryBackend)
+    backend._bigquery = FakeBigQueryModule()
+    backend._client = FakeClient()
+
+    result = backend.execute_aggregate_at_most_two_no_retry(
+        "SELECT aggregate_only",
+        {"cutoff_height": 959_187},
+        maximum_bytes_billed=650_000_000_000,
+        job_id="cai_btc_candidate_statistics_fixture",
+    )
+
+    assert backend._client.query_arguments["retry"] is None
+    assert backend._client.query_arguments["job_retry"] is None
+    assert backend._client.query_arguments["job_id"] == (
+        "cai_btc_candidate_statistics_fixture"
+    )
+    assert backend._client.job.result_arguments == {
+        "page_size": 2,
+        "max_results": 2,
+        "retry": None,
+        "job_retry": None,
+    }
+    assert result.rows == (
+        {
+            "contract_version": "btc_candidate_statistics_v1",
+            "p0_overlap_distribution": [
+                {"mask": 1, "address_count": 2},
+            ],
+        },
+    )
+    assert result.total_bytes_processed == 637_999_682_243
+    assert result.total_bytes_billed == 637_999_682_243

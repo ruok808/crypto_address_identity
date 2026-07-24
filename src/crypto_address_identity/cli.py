@@ -64,6 +64,12 @@ from crypto_address_identity.universe.bitcoin_core import BitcoinCoreProbe
 from crypto_address_identity.universe.candidate_statistics import (
     BigQueryCandidateStatisticsProbe,
 )
+from crypto_address_identity.universe.candidate_execution import (
+    CandidateStatisticsExecutionAlreadyAttempted,
+    CandidateStatisticsExecutionRequest,
+    CandidateStatisticsOneShotExecutor,
+    preview_candidate_statistics_execution,
+)
 from crypto_address_identity.universe.features import (
     BigQueryFeatureMaterializer,
     BigQueryMaterializationRequest,
@@ -299,6 +305,66 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe_probe_candidate_statistics.set_defaults(
         handler=_handle_universe_probe_bigquery_candidate_statistics
+    )
+
+    universe_execute = universe_commands.add_parser("execute")
+    universe_execute_commands = universe_execute.add_subparsers(
+        dest="universe_execute_command",
+        required=True,
+    )
+    universe_execute_candidate_statistics = universe_execute_commands.add_parser(
+        "bigquery-candidate-statistics"
+    )
+    candidate_execution_mode = (
+        universe_execute_candidate_statistics.add_mutually_exclusive_group(
+            required=True
+        )
+    )
+    candidate_execution_mode.add_argument("--dry-run", action="store_true")
+    candidate_execution_mode.add_argument("--execute-once", action="store_true")
+    universe_execute_candidate_statistics.add_argument(
+        "--authorization-id",
+        required=True,
+    )
+    universe_execute_candidate_statistics.add_argument(
+        "--as-of-date",
+        required=True,
+    )
+    universe_execute_candidate_statistics.add_argument(
+        "--cutoff-height",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics.add_argument(
+        "--expected-query-sha256",
+        required=True,
+    )
+    universe_execute_candidate_statistics.add_argument(
+        "--expected-schema-sha256",
+        required=True,
+    )
+    universe_execute_candidate_statistics.add_argument(
+        "--expected-source-address-count",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics.add_argument(
+        "--maximum-bytes-billed",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics.add_argument(
+        "--sandbox-budget-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics.add_argument(
+        "--reserve-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_candidate_statistics.set_defaults(
+        handler=_handle_universe_execute_bigquery_candidate_statistics
     )
 
     universe_probe_bitcoin = universe_probe_commands.add_parser("bitcoin-core")
@@ -882,6 +948,48 @@ def _handle_universe_probe_bigquery_candidate_statistics(
         "provider_points": 0,
         "written_paths": [],
     }
+
+
+def _handle_universe_execute_bigquery_candidate_statistics(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    request = CandidateStatisticsExecutionRequest(
+        authorization_id=arguments.authorization_id,
+        as_of_date=_parse_date(arguments.as_of_date),
+        cutoff_height=arguments.cutoff_height,
+        expected_query_sha256=arguments.expected_query_sha256,
+        expected_schema_sha256=arguments.expected_schema_sha256,
+        expected_source_standard_address_count=(
+            arguments.expected_source_address_count
+        ),
+        maximum_bytes_billed=arguments.maximum_bytes_billed,
+        sandbox_budget_bytes=arguments.sandbox_budget_bytes,
+        reserve_bytes=arguments.reserve_bytes,
+    )
+    receipt_root = settings.universe_root / "executions"
+    if arguments.dry_run:
+        outcome = preview_candidate_statistics_execution(
+            request,
+            dataset=settings.bigquery_dataset,
+            receipt_root=receipt_root,
+        )
+    else:
+        try:
+            outcome = CandidateStatisticsOneShotExecutor(
+                backend=_make_bigquery_backend(settings),
+                dataset=settings.bigquery_dataset,
+                receipt_root=receipt_root,
+                max_source_age=timedelta(
+                    hours=settings.universe_max_source_age_hours
+                ),
+            ).run(request)
+        except CandidateStatisticsExecutionAlreadyAttempted as exc:
+            raise CliError(
+                "candidate execution authorization was already attempted",
+                error_code="candidate_execution_already_attempted",
+            ) from exc
+    return outcome.model_dump(mode="json")
 
 
 def _handle_universe_probe_bitcoin(

@@ -60,23 +60,32 @@ Follow this exact operating sequence:
    dry run. It fails closed above the fixed 650 billion-byte query limit or
    when projected month usage would consume the operator-required reserve. It
    has no chain-query execution path and does not return candidate counts.
-5. **Bitcoin Core read-only probe.** Run only the four allow-listed RPCs:
+5. **One-shot candidate-statistics execution.** Only after the fixed query,
+   source schema, cutoff, source-address baseline, monthly usage, and reserve
+   have been reviewed, use the separate `universe execute` command. It requires
+   the exact 650 billion-byte cap and creates a mode-0600 exclusive receipt
+   before submitting one deterministic BigQuery job. The SDK query and result
+   calls both disable automatic retries. At most two rows are fetched; exactly
+   one strict aggregate row is accepted. A started, failed, blocked, or
+   completed receipt prevents a second submission with the same authorization
+   id. This command never materializes candidate addresses.
+6. **Bitcoin Core read-only probe.** Run only the four allow-listed RPCs:
    `getblockchaininfo`, `getblockhash`, `getblockheader`, and `getindexinfo`.
    Cookie content, authorization data, and raw RPC errors never enter output.
-6. **Cutoff height/hash reconciliation.** Require the finalized BigQuery and
+7. **Cutoff height/hash reconciliation.** Require the finalized BigQuery and
    Bitcoin Core height/hash to agree. A partial or unavailable Core source
    cannot establish a canonical complete-history cutoff.
-7. **Review dry-run bytes.** Compare the reported bytes with the exact job cap,
+8. **Review dry-run bytes.** Compare the reported bytes with the exact job cap,
    remaining account allowance, and local storage budget.
-8. **Separately approved chain read.** Run one `--execute-chain-read` command
+9. **Separately approved chain read.** Run one `--execute-chain-read` command
    with the reviewed query hash, cutoff, and positive
    `--maximum-bytes-billed`. Do not retry a completed job.
-9. **Campaign checksum verification.** Verify the immutable manifest, Parquet
+10. **Campaign checksum verification.** Verify the immutable manifest, Parquet
    schemas, source probes, and every recorded artifact checksum.
-10. **Aggregate-only candidate dry-run.** Run `cai universe candidates` to
+11. **Aggregate-only candidate dry-run.** Run `cai universe candidates` to
    inspect coverage, P0/P1/control counts, overlap, capacity, and projected
    time. It does not output addresses or open the identity SQLite database.
-11. **Stop and report.** Phase 1 stops after aggregate statistics.
+12. **Stop and report.** Phase 1 stops after aggregate statistics.
    It does not approve the 1,000-address canary.
 
 Example offline and bounded commands:
@@ -103,6 +112,26 @@ cai universe probe bigquery-candidate-statistics --execute-readonly \
   --sandbox-budget-bytes REVIEWED_SANDBOX_BUDGET \
   --reserve-bytes REVIEWED_RESERVE_BYTES
 
+cai universe execute bigquery-candidate-statistics --dry-run \
+  --authorization-id REVIEWED_ONE_SHOT_ID \
+  --as-of-date 2026-07-24 --cutoff-height 959187 \
+  --expected-query-sha256 5dbb2c914448837ac43b20e4943abb33130cf2ce9c1b7c2a72eb5ce4d285012c \
+  --expected-schema-sha256 7353193a75b43704d273b8bcfc4a0d4d56fc9cdc6623704bb25855a0f439dfb7 \
+  --expected-source-address-count 1557951354 \
+  --maximum-bytes-billed 650000000000 \
+  --sandbox-budget-bytes 1099511627776 \
+  --reserve-bytes 250000000000
+
+cai universe execute bigquery-candidate-statistics --execute-once \
+  --authorization-id REVIEWED_ONE_SHOT_ID \
+  --as-of-date 2026-07-24 --cutoff-height 959187 \
+  --expected-query-sha256 5dbb2c914448837ac43b20e4943abb33130cf2ce9c1b7c2a72eb5ce4d285012c \
+  --expected-schema-sha256 7353193a75b43704d273b8bcfc4a0d4d56fc9cdc6623704bb25855a0f439dfb7 \
+  --expected-source-address-count 1557951354 \
+  --maximum-bytes-billed 650000000000 \
+  --sandbox-budget-bytes 1099511627776 \
+  --reserve-bytes 250000000000
+
 cai universe probe bitcoin-core --execute-readonly
 
 cai universe build bigquery --execute-chain-read \
@@ -126,7 +155,14 @@ that allowance available, and it is not approval to execute the query.
 A `within_budget` candidate-statistics result additionally means that the
 projected successful-job total preserves the requested reserve and that the
 fixed SQL compiled in a BigQuery dry run. It is still not the census result and
-does not authorize executing the approximately 638 GB query.
+does not by itself authorize executing the approximately 638 GB query.
+
+The one-shot execution receipt is stored under
+`CAI_UNIVERSE_ROOT/executions/<authorization-id>.json`. It contains only
+checksums, aggregate counters, quality evidence, byte accounting, and execution
+status. It never contains an address, transaction hash, provider token, raw
+upstream error, or source payload. Removing or editing a receipt to force a
+rerun is outside the supported workflow.
 A pruned Bitcoin Core node cannot prove historical script coverage; it reports
 partial capability and the workflow stops before claiming chain-universe
 completeness.

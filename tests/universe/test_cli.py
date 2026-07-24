@@ -6,7 +6,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from crypto_address_identity.cli import main
-from crypto_address_identity.universe.bigquery import MonthlyQueryUsage, QueryEstimate
+from crypto_address_identity.universe.bigquery import (
+    AggregateQueryExecution,
+    MonthlyQueryUsage,
+    QueryEstimate,
+)
+from crypto_address_identity.universe.candidate_execution import (
+    CANDIDATE_STATISTICS_MAXIMUM_BYTES_BILLED,
+    PINNED_CANDIDATE_QUERY_SHA256,
+    PINNED_CANDIDATE_SCHEMA_SHA256,
+    PINNED_CUTOFF_HEIGHT,
+    PINNED_SOURCE_STANDARD_ADDRESS_COUNT,
+)
 from crypto_address_identity.universe.features import FeatureMaterializationResult
 from crypto_address_identity.universe.models import SourceManifest, SourceProbeResult
 from crypto_address_identity.universe.query_plan import BigQueryQueryPlan
@@ -18,6 +29,10 @@ from tests.universe.conftest import (
     make_script,
 )
 from tests.universe.test_bigquery_probe import table_metadata
+from tests.universe.test_candidate_execution import (
+    PinnedTableMetadata,
+    execution_result_row,
+)
 
 
 class FakeBigQueryBackend:
@@ -89,6 +104,30 @@ class FakeBitcoinCoreProbe:
         )
 
 
+class FakeCandidateExecutionBackend(FakeBigQueryBackend):
+    def table_metadata(self, table_id: str) -> PinnedTableMetadata:
+        self.calls.append("table_metadata")
+        assert table_id.endswith(".transactions")
+        return PinnedTableMetadata()
+
+    def execute_aggregate_at_most_two_no_retry(
+        self,
+        sql: str,
+        parameters: dict[str, object],
+        *,
+        maximum_bytes_billed: int,
+        job_id: str,
+    ) -> AggregateQueryExecution:
+        self.calls.append("execute_aggregate_at_most_two_no_retry")
+        assert maximum_bytes_billed == CANDIDATE_STATISTICS_MAXIMUM_BYTES_BILLED
+        assert job_id.startswith("cai_btc_candidate_statistics_")
+        return AggregateQueryExecution(
+            rows=(execution_result_row(),),
+            total_bytes_processed=900,
+            total_bytes_billed=900,
+        )
+
+
 class FakeBigQueryMaterializer:
     def __init__(self) -> None:
         self.requests = []
@@ -151,6 +190,33 @@ def _publish_campaign(tmp_path: Path) -> None:
 
 def _output(capsys) -> dict[str, object]:
     return json.loads(capsys.readouterr().out)
+
+
+def _candidate_execution_arguments(mode: str) -> list[str]:
+    return [
+        "universe",
+        "execute",
+        "bigquery-candidate-statistics",
+        mode,
+        "--authorization-id",
+        "btc-candidate-statistics-20260724-v1",
+        "--as-of-date",
+        "2026-07-24",
+        "--cutoff-height",
+        str(PINNED_CUTOFF_HEIGHT),
+        "--expected-query-sha256",
+        PINNED_CANDIDATE_QUERY_SHA256,
+        "--expected-schema-sha256",
+        PINNED_CANDIDATE_SCHEMA_SHA256,
+        "--expected-source-address-count",
+        str(PINNED_SOURCE_STANDARD_ADDRESS_COUNT),
+        "--maximum-bytes-billed",
+        str(CANDIDATE_STATISTICS_MAXIMUM_BYTES_BILLED),
+        "--sandbox-budget-bytes",
+        "1099511627776",
+        "--reserve-bytes",
+        "250000000000",
+    ]
 
 
 def test_bigquery_offline_probe_does_not_construct_backend_or_write(
@@ -478,6 +544,72 @@ def test_bigquery_candidate_statistics_live_probe_requires_pinned_hash(
         "error_code": "invalid_input",
         "status": "error",
     }
+
+
+def test_bigquery_candidate_statistics_execution_preview_is_offline(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: (_ for _ in ()).throw(AssertionError("network boundary")),
+    )
+
+    exit_code = main(_candidate_execution_arguments("--dry-run"))
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "dry_run"
+    assert output["query_sha256"] == PINNED_CANDIDATE_QUERY_SHA256
+    assert output["expected_schema_sha256"] == PINNED_CANDIDATE_SCHEMA_SHA256
+    assert output["execution_calls"] == 0
+    assert output["automatic_retries"] == 0
+    assert output["candidate_materialized"] is False
+    assert output["written_paths"] == []
+    assert not (tmp_path / "universe").exists()
+
+
+def test_bigquery_candidate_statistics_executes_once_via_explicit_cli(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    backend = FakeCandidateExecutionBackend()
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: backend,
+    )
+
+    exit_code = main(_candidate_execution_arguments("--execute-once"))
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "completed"
+    assert output["row_count"] == 1
+    assert output["execution_calls"] == 1
+    assert output["automatic_retries"] == 0
+    assert output["candidate_materialized"] is False
+    assert output["provider_requests"] == 0
+    assert output["provider_points"] == 0
+    assert len(output["written_paths"]) == 1
+    assert backend.calls == [
+        "table_metadata",
+        "monthly_successful_query_usage",
+        "dry_run",
+        "execute_aggregate_at_most_two_no_retry",
+    ]
+
+    second_exit_code = main(_candidate_execution_arguments("--execute-once"))
+    second_output = _output(capsys)
+    assert second_exit_code == 2
+    assert second_output == {
+        "error_code": "candidate_execution_already_attempted",
+        "status": "error",
+    }
+    assert backend.calls.count("execute_aggregate_at_most_two_no_retry") == 1
 
 
 def test_bitcoin_core_execute_readonly_uses_injected_probe(

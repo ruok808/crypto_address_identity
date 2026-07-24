@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal, Protocol
 
@@ -78,6 +79,21 @@ class MonthlyQueryUsage(UniverseModel):
     total_bytes_billed: int = Field(ge=0)
 
 
+@dataclass(frozen=True)
+class AggregateQueryExecution:
+    """At most two normalized rows from one no-retry aggregate query."""
+
+    rows: tuple[dict[str, object], ...]
+    total_bytes_processed: int
+    total_bytes_billed: int
+
+    def __post_init__(self) -> None:
+        if len(self.rows) > 2:
+            raise ValueError("aggregate query result must contain at most two rows")
+        if self.total_bytes_processed < 0 or self.total_bytes_billed < 0:
+            raise ValueError("aggregate query byte counters must be non-negative")
+
+
 class BigQueryBackend(Protocol):
     last_query_total_bytes_processed: int | None
 
@@ -96,6 +112,15 @@ class BigQueryBackend(Protocol):
         month_start: datetime,
         month_end: datetime,
     ) -> MonthlyQueryUsage: ...
+
+    def execute_aggregate_at_most_two_no_retry(
+        self,
+        sql: str,
+        parameters: dict[str, object],
+        *,
+        maximum_bytes_billed: int,
+        job_id: str,
+    ) -> AggregateQueryExecution: ...
 
     def query_one(
         self,
@@ -699,6 +724,51 @@ class GoogleBigQueryBackend:
             raise BigQueryBoundaryError("BigQuery checkpoint query failed") from exc
         return dict(row.items())
 
+    def execute_aggregate_at_most_two_no_retry(
+        self,
+        sql: str,
+        parameters: dict[str, object],
+        *,
+        maximum_bytes_billed: int,
+        job_id: str,
+    ) -> AggregateQueryExecution:
+        if maximum_bytes_billed <= 0:
+            raise BigQueryBoundaryError("BigQuery execution budget must be positive")
+        if not job_id or len(job_id) > 1_024:
+            raise BigQueryBoundaryError("BigQuery job id is invalid")
+        job_config = self._query_job_config(
+            parameters,
+            maximum_bytes_billed=maximum_bytes_billed,
+            dry_run=False,
+        )
+        try:
+            job = self._client.query(
+                sql,
+                job_config=job_config,
+                job_id=job_id,
+                retry=None,
+                job_retry=None,
+            )
+            result = job.result(
+                page_size=2,
+                max_results=2,
+                retry=None,
+                job_retry=None,
+            )
+            rows = tuple(
+                _normalize_bigquery_row(row)
+                for row in result
+            )
+        except Exception as exc:
+            raise BigQueryBoundaryError(
+                "BigQuery one-shot aggregate query failed"
+            ) from exc
+        return AggregateQueryExecution(
+            rows=rows,
+            total_bytes_processed=int(job.total_bytes_processed or 0),
+            total_bytes_billed=int(job.total_bytes_billed or 0),
+        )
+
     def stream_arrow_batches(
         self,
         sql: str,
@@ -761,3 +831,26 @@ class GoogleBigQueryBackend:
         else:
             raise BigQueryBoundaryError("Unsupported BigQuery parameter type")
         return bigquery.ScalarQueryParameter(name, parameter_type, value)
+
+
+def _normalize_bigquery_row(row: object) -> dict[str, object]:
+    if not hasattr(row, "items"):
+        raise BigQueryBoundaryError("BigQuery aggregate row is malformed")
+    return {
+        str(key): _normalize_bigquery_value(value)
+        for key, value in row.items()
+    }
+
+
+def _normalize_bigquery_value(value: object) -> object:
+    if hasattr(value, "items"):
+        return {
+            str(key): _normalize_bigquery_value(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _normalize_bigquery_value(item)
+            for item in value
+        ]
+    return value
