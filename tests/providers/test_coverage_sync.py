@@ -328,6 +328,32 @@ def test_incomplete_prediction_retries_before_new_discovery_entities(
     assert detail_requests[-1] == "retry"
 
 
+def test_discovery_rank_wins_over_entity_identifier_order(env_mapping: dict[str, str]) -> None:
+    detail_requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/entity_balance_changes"):
+            return httpx.Response(200, json=[{"id": "zz-top"}, {"id": "aaa-lower"}])
+        if "/entity/" in path and "/entity_predictions/" not in path:
+            entity_id = path.rsplit("/", 1)[-1]
+            detail_requests.append(entity_id)
+            return httpx.Response(200, json={"entity": {"id": entity_id}})
+        if "/entity_predictions/" in path:
+            return httpx.Response(200, json=[])
+        return httpx.Response(404, json={})
+
+    _, service = _service(env_mapping, handler)
+    result = service.run(
+        dry_run=False,
+        entity_limit=1,
+        now=datetime(2026, 7, 24, tzinfo=UTC),
+    )
+
+    assert result.status == "completed"
+    assert detail_requests == ["zz-top"]
+
+
 def test_malformed_address_enrichment_does_not_enter_the_ttl_cache(env_mapping: dict[str, str]) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/entity_balance_changes"):

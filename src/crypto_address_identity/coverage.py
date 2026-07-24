@@ -236,7 +236,7 @@ class CoverageSyncService:
         discovery_requests = 0
         blocked = False
 
-        discovered_entity_ids: list[str] = []
+        discovered_entities: list[CoverageEntity] = []
         for interval, order_by in (("30d", "balanceUsd"), ("7d", "balanceUsdChange")):
             outcome = self._dispatch(
                 run_id=run_id,
@@ -265,14 +265,14 @@ class CoverageSyncService:
                         discovery_method="balance_changes",
                         observed_at=observed_at,
                     )[1]
-                    discovered_entity_ids.extend(entity.provider_entity_id for entity in entities)
+                    discovered_entities.extend(entities)
             elif outcome.outcome == "blocked":
                 blocked = True
                 break
 
         if not blocked:
             planned_entities = self._select_due_entities(
-                limit=entity_limit, now=observed_at, extra_entity_ids=discovered_entity_ids
+                limit=entity_limit, now=observed_at, extra_entities=discovered_entities
             )
             for entity_id in planned_entities:
                 detail = self._dispatch(
@@ -449,7 +449,7 @@ class CoverageSyncService:
         *,
         limit: int,
         now: datetime,
-        extra_entity_ids: Iterable[str] = (),
+        extra_entities: Iterable["CoverageEntity"] = (),
     ) -> tuple[str, ...]:
         freshness_cutoff = _utc_string(now - timedelta(hours=self.settings.coverage_entity_ttl_hours))
         priority: dict[str, int] = {}
@@ -493,9 +493,32 @@ class CoverageSyncService:
             for entity_id in fresh_detail_entities - fresh_prediction_entities:
                 if entity_id not in cooling_down_entities:
                     priority[entity_id] = 75
-            for entity_id in extra_entity_ids:
-                if entity_id not in fresh_entities and entity_id not in cooling_down_entities:
-                    priority[entity_id] = max(priority.get(entity_id, 0), 50)
+            for entity in extra_entities:
+                if (
+                    entity.provider_entity_id not in fresh_entities
+                    and entity.provider_entity_id not in cooling_down_entities
+                ):
+                    priority[entity.provider_entity_id] = max(
+                        priority.get(entity.provider_entity_id, 0),
+                        _discovery_priority(entity.rank),
+                    )
+            for row in connection.execute(
+                """
+                SELECT provider_entity_id, MIN(discovery_rank) AS discovery_rank
+                FROM coverage_entity_observation
+                WHERE discovery_method = 'balance_changes'
+                  AND discovery_rank IS NOT NULL
+                GROUP BY provider_entity_id
+                """
+            ).fetchall():
+                if (
+                    row["provider_entity_id"] not in fresh_entities
+                    and row["provider_entity_id"] not in cooling_down_entities
+                ):
+                    priority[row["provider_entity_id"]] = max(
+                        priority.get(row["provider_entity_id"], 0),
+                        _discovery_priority(row["discovery_rank"]),
+                    )
             for row in connection.execute(
                 """
                 SELECT provider_entity_id, MAX(priority) AS priority
@@ -1015,6 +1038,14 @@ def _dedupe_entities(entities: tuple[CoverageEntity, ...]) -> tuple[CoverageEnti
     for entity in entities:
         selected.setdefault(entity.provider_entity_id, entity)
     return tuple(selected.values())
+
+
+def _discovery_priority(rank: int | None) -> int:
+    """Map the provider's rank to a bounded local scheduler priority."""
+
+    if rank is None:
+        return 50
+    return max(20, 70 - min(rank - 1, 50))
 
 
 def _estimate_points(response_bytes: int) -> int:

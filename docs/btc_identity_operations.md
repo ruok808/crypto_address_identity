@@ -92,6 +92,8 @@ and prediction fan-out, then fills the remaining request capacity with direct
 address enrichment (eight entities leave seven direct-address requests). A
 subsequent run where entity details are still fresh spends that capacity on more
 due addresses instead.
+Within the discovery queue, provider rank is retained and used as local priority;
+explicit seeds and incomplete prediction retries still take precedence.
 
 Entity-detail and entity-prediction TTLs are independent: a structurally valid
 prediction response containing no Bitcoin addresses is a terminal BTC-negative
