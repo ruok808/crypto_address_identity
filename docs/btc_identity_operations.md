@@ -233,6 +233,25 @@ rechecking the immutable cloud-job evidence and a fresh live cost probe. The
 recovery receipt also permanently consumes this second authorization; there is
 no supported third attempt.
 
+If the fixed cloud job reaches `DONE` but the original client stalls while
+reading its result, do not submit another query and do not remove the
+`started` receipt. After confirming the original client process has stopped,
+replace `--dry-run` in the recovery command above with
+`--reconcile-existing-job`. This mode:
+
+- accepts only the pinned recovery authorization and deterministic recovery
+  job id;
+- requires the existing receipt to remain a regular mode-`0600` file with
+  exact started-state contract fields;
+- calls BigQuery `get_job` and reads at most two rows from that existing job;
+- never calls BigQuery `query`, performs no retry, and applies the same result,
+  checksum, source-count, freshness, processed-byte, and billing-cap gates;
+- atomically changes the existing receipt to `completed` or
+  `quality_blocked`; a failed result fetch leaves it unchanged and retryable.
+
+This is result reconciliation, not a third execution authorization. It is
+valid only for recovering the already submitted fixed job.
+
 The one-shot command can return one identifier-free aggregate row only. It has
 no destination table, address export, provider call, candidate materialization,
 or consumer effect. A successful live dry run still proves only compilation

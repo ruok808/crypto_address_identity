@@ -56,6 +56,7 @@ from tests.universe.test_candidate_execution_v2 import (
     EXPECTED_SUCCESSFUL_QUERY_JOBS,
     PinnedV2TableMetadata,
     execution_result_row as execution_result_row_v2,
+    write_started_recovery_receipt,
 )
 
 
@@ -195,6 +196,21 @@ class FakeCandidateExecutionV2Backend(FakeBigQueryBackend):
             CANDIDATE_STATISTICS_V2_MAXIMUM_BYTES_BILLED
         )
         assert job_id.startswith("cai_btc_importance_v2_")
+        return AggregateQueryExecution(
+            rows=(execution_result_row_v2(),),
+            total_bytes_processed=PINNED_V2_DRY_RUN_BYTES,
+            total_bytes_billed=PINNED_V2_DRY_RUN_BYTES,
+        )
+
+    def fetch_existing_aggregate_at_most_two_no_retry(
+        self,
+        *,
+        job_id: str,
+        timeout_seconds: float,
+    ) -> AggregateQueryExecution:
+        self.calls.append("fetch_existing_aggregate_at_most_two_no_retry")
+        assert job_id.startswith("cai_btc_importance_v2_")
+        assert timeout_seconds == 120.0
         return AggregateQueryExecution(
             rows=(execution_result_row_v2(),),
             total_bytes_processed=PINNED_V2_DRY_RUN_BYTES,
@@ -945,6 +961,45 @@ def test_bigquery_candidate_statistics_v2_executes_once_via_cli(
     assert backend.calls.count(
         "execute_aggregate_at_most_two_no_retry"
     ) == 1
+
+
+def test_bigquery_candidate_statistics_v2_reconciles_existing_job_via_cli(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    write_started_recovery_receipt(
+        tmp_path / "universe",
+        changes={
+            "created_at": datetime.now(UTC).isoformat().replace(
+                "+00:00",
+                "Z",
+            )
+        },
+    )
+    backend = FakeCandidateExecutionV2Backend()
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: backend,
+    )
+
+    exit_code = main(
+        _candidate_execution_v2_recovery_arguments(
+            "--reconcile-existing-job"
+        )
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "completed"
+    assert output["row_count"] == 1
+    assert output["execution_calls"] == 1
+    assert output["automatic_retries"] == 0
+    assert output["candidate_materialized"] is False
+    assert backend.calls == [
+        "fetch_existing_aggregate_at_most_two_no_retry",
+    ]
 
 
 def test_bitcoin_core_execute_readonly_uses_injected_probe(

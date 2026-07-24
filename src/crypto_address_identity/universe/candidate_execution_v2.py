@@ -13,7 +13,10 @@ from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from crypto_address_identity.universe.bigquery import BigQueryBackend
+from crypto_address_identity.universe.bigquery import (
+    AggregateQueryExecution,
+    BigQueryBackend,
+)
 from crypto_address_identity.universe.candidate_statistics_v2 import (
     PINNED_V2_CUTOFF_HEIGHT,
     PINNED_V2_SOURCE_INPUT_ONLY_ADDRESS_COUNT,
@@ -63,6 +66,10 @@ class CandidateStatisticsV2ExecutionAlreadyAttempted(RuntimeError):
 
 class CandidateStatisticsV2RecoveryEvidenceInvalid(RuntimeError):
     """Raised before network use when quota-recovery evidence is invalid."""
+
+
+class CandidateStatisticsV2ExistingJobNotReconcilable(RuntimeError):
+    """Raised when a started receipt cannot safely reconcile its fixed job."""
 
 
 class CandidateStatisticsV2ExecutionRequest(UniverseModel):
@@ -572,61 +579,288 @@ class CandidateStatisticsV2OneShotExecutor:
             _finish_receipt(receipt_path, outcome)
             return outcome
 
-        statistics, quality = parse_candidate_statistics_v2_rows(
-            execution.rows,
-            expected_query_sha256=request.expected_query_sha256,
-            expected_schema_sha256=request.expected_schema_sha256,
-            expected_source_standard_address_count=(
-                request.expected_source_standard_address_count
-            ),
-            expected_source_input_only_address_count=(
-                request.expected_source_input_only_address_count
-            ),
-            expected_cutoff_height=request.cutoff_height,
-            expected_cutoff_time=request.cutoff_time,
-            now=self._now,
-            max_source_age=self._max_source_age,
-        )
-        post_execution_reasons = list(quality.blocking_reasons)
-        if execution.total_bytes_processed != request.expected_dry_run_bytes:
-            post_execution_reasons.append(
-                "candidate_statistics_v2_execution_processed_bytes_mismatch"
-            )
-        if execution.total_bytes_billed > request.maximum_bytes_billed:
-            post_execution_reasons.append(
-                "candidate_statistics_v2_execution_billing_cap_exceeded"
-            )
-        if post_execution_reasons:
-            quality = CandidateStatisticsV2QualityReport(
-                status="blocked",
-                allow_interpretation=False,
-                blocking_reasons=tuple(post_execution_reasons),
-                warnings=quality.warnings,
-            )
-        outcome = _outcome(
-            status=(
-                "completed"
-                if quality.allow_interpretation
-                else "quality_blocked"
-            ),
+        outcome = _execution_outcome(
             request=request,
             plan=self._plan,
             receipt_path=receipt_path,
-            receipt_created=True,
-            cost_estimate=cost,
-            row_count=len(execution.rows),
-            total_bytes_processed=execution.total_bytes_processed,
-            total_bytes_billed=execution.total_bytes_billed,
-            statistics=statistics,
-            quality=quality,
-            blocking_reasons=quality.blocking_reasons,
-            network_requests=cost.network_requests + 1,
-            execution_calls=1,
-            written_paths=(str(receipt_path),),
+            cost=cost,
+            execution=execution,
+            max_source_age=self._max_source_age,
+            now=self._now,
             recovery_evidence_validated=recovery_evidence_validated,
         )
         _finish_receipt(receipt_path, outcome)
         return outcome
+
+
+class CandidateStatisticsV2ExistingJobReconciler:
+    """Finish one fixed started receipt without submitting another query."""
+
+    def __init__(
+        self,
+        *,
+        backend: BigQueryBackend,
+        dataset: str,
+        receipt_root: Path,
+        max_source_age: timedelta,
+        now: datetime | None = None,
+    ) -> None:
+        if max_source_age <= timedelta(0):
+            raise ValueError("max_source_age must be positive")
+        self._backend = backend
+        self._plan = BigQueryQueryPlan.load(dataset)
+        self._receipt_root = receipt_root
+        self._max_source_age = max_source_age
+        self._now = _as_utc(now or datetime.now(UTC))
+
+    def run(
+        self,
+        request: CandidateStatisticsV2ExecutionRequest,
+    ) -> CandidateStatisticsV2ExecutionOutcome:
+        _validate_plan(self._plan, request)
+        if (
+            request.authorization_id
+            != CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID
+        ):
+            raise CandidateStatisticsV2ExistingJobNotReconcilable()
+        receipt_path = _receipt_path(
+            self._receipt_root,
+            request.authorization_id,
+        )
+        cost = _load_started_recovery_receipt(
+            receipt_path,
+            request=request,
+            plan=self._plan,
+            now=self._now,
+        )
+        try:
+            execution = (
+                self._backend
+                .fetch_existing_aggregate_at_most_two_no_retry(
+                    job_id=_job_id(request),
+                    timeout_seconds=120.0,
+                )
+            )
+        except Exception as exc:
+            raise CandidateStatisticsV2ExistingJobNotReconcilable() from exc
+        outcome = _execution_outcome(
+            request=request,
+            plan=self._plan,
+            receipt_path=receipt_path,
+            cost=cost,
+            execution=execution,
+            max_source_age=self._max_source_age,
+            now=self._now,
+            recovery_evidence_validated=True,
+        )
+        _finish_receipt(receipt_path, outcome)
+        return outcome
+
+
+def _execution_outcome(
+    *,
+    request: CandidateStatisticsV2ExecutionRequest,
+    plan: BigQueryQueryPlan,
+    receipt_path: Path,
+    cost: CandidateStatisticsV2CostEstimate,
+    execution: AggregateQueryExecution,
+    max_source_age: timedelta,
+    now: datetime,
+    recovery_evidence_validated: bool,
+) -> CandidateStatisticsV2ExecutionOutcome:
+    statistics, quality = parse_candidate_statistics_v2_rows(
+        execution.rows,
+        expected_query_sha256=request.expected_query_sha256,
+        expected_schema_sha256=request.expected_schema_sha256,
+        expected_source_standard_address_count=(
+            request.expected_source_standard_address_count
+        ),
+        expected_source_input_only_address_count=(
+            request.expected_source_input_only_address_count
+        ),
+        expected_cutoff_height=request.cutoff_height,
+        expected_cutoff_time=request.cutoff_time,
+        now=now,
+        max_source_age=max_source_age,
+    )
+    post_execution_reasons = list(quality.blocking_reasons)
+    if execution.total_bytes_processed != request.expected_dry_run_bytes:
+        post_execution_reasons.append(
+            "candidate_statistics_v2_execution_processed_bytes_mismatch"
+        )
+    if execution.total_bytes_billed > request.maximum_bytes_billed:
+        post_execution_reasons.append(
+            "candidate_statistics_v2_execution_billing_cap_exceeded"
+        )
+    if post_execution_reasons:
+        quality = CandidateStatisticsV2QualityReport(
+            status="blocked",
+            allow_interpretation=False,
+            blocking_reasons=tuple(post_execution_reasons),
+            warnings=quality.warnings,
+        )
+    return _outcome(
+        status=(
+            "completed" if quality.allow_interpretation else "quality_blocked"
+        ),
+        request=request,
+        plan=plan,
+        receipt_path=receipt_path,
+        receipt_created=True,
+        cost_estimate=cost,
+        row_count=len(execution.rows),
+        total_bytes_processed=execution.total_bytes_processed,
+        total_bytes_billed=execution.total_bytes_billed,
+        statistics=statistics,
+        quality=quality,
+        blocking_reasons=quality.blocking_reasons,
+        network_requests=cost.network_requests + 1,
+        execution_calls=1,
+        written_paths=(str(receipt_path),),
+        recovery_evidence_validated=recovery_evidence_validated,
+    )
+
+
+def _load_started_recovery_receipt(
+    path: Path,
+    *,
+    request: CandidateStatisticsV2ExecutionRequest,
+    plan: BigQueryQueryPlan,
+    now: datetime,
+) -> CandidateStatisticsV2CostEstimate:
+    try:
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise CandidateStatisticsV2ExistingJobNotReconcilable()
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise CandidateStatisticsV2ExistingJobNotReconcilable()
+        encoded = path.read_bytes()
+        if not encoded or len(encoded) > 1_000_000:
+            raise CandidateStatisticsV2ExistingJobNotReconcilable()
+        payload = json.loads(encoded)
+        if not isinstance(payload, dict):
+            raise CandidateStatisticsV2ExistingJobNotReconcilable()
+        created_at = _as_utc(
+            datetime.fromisoformat(
+                str(payload["created_at"]).replace("Z", "+00:00")
+            )
+        )
+        cost = CandidateStatisticsV2CostEstimate.model_validate(
+            payload["cost_estimate"]
+        )
+    except CandidateStatisticsV2ExistingJobNotReconcilable:
+        raise
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise CandidateStatisticsV2ExistingJobNotReconcilable() from exc
+
+    expected_fields = {
+        "schema_version": (
+            "btc_candidate_statistics_v2_execution_receipt_v1"
+        ),
+        "status": "started",
+        "authorization_id": request.authorization_id,
+        "job_id": _job_id(request),
+        "billing_acknowledged": True,
+        "query_sha256": plan.candidate_statistics_v2_sha256,
+        "expected_schema_sha256": request.expected_schema_sha256,
+        "expected_source_standard_address_count": (
+            request.expected_source_standard_address_count
+        ),
+        "expected_source_input_only_address_count": (
+            request.expected_source_input_only_address_count
+        ),
+        "expected_dry_run_bytes": request.expected_dry_run_bytes,
+        "expected_successful_query_jobs": (
+            request.expected_successful_query_jobs
+        ),
+        "expected_month_to_date_billed_bytes": (
+            request.expected_month_to_date_billed_bytes
+        ),
+        "cutoff_height": request.cutoff_height,
+        "cutoff_time": request.cutoff_time.isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        "maximum_bytes_billed": request.maximum_bytes_billed,
+        "monthly_processing_budget_bytes": (
+            request.monthly_processing_budget_bytes
+        ),
+        "reserve_bytes": request.reserve_bytes,
+        "automatic_retries": 0,
+        "candidate_materialized": False,
+        "recovery_from_authorization_id": (
+            request.recovery_from_authorization_id
+        ),
+        "expected_previous_receipt_sha256": (
+            request.expected_previous_receipt_sha256
+        ),
+        "expected_previous_job_id": request.expected_previous_job_id,
+        "expected_previous_job_error_reason": (
+            request.expected_previous_job_error_reason
+        ),
+        "expected_previous_job_total_bytes_processed": (
+            request.expected_previous_job_total_bytes_processed
+        ),
+        "expected_previous_job_total_bytes_billed": (
+            request.expected_previous_job_total_bytes_billed
+        ),
+        "recovery_evidence_validated": True,
+    }
+    if any(
+        payload.get(field) != expected
+        for field, expected in expected_fields.items()
+    ):
+        raise CandidateStatisticsV2ExistingJobNotReconcilable()
+    if created_at > now + timedelta(minutes=5):
+        raise CandidateStatisticsV2ExistingJobNotReconcilable()
+    if any(
+        field in payload
+        for field in (
+            "completed_at",
+            "statistics",
+            "quality",
+            "total_bytes_processed",
+            "total_bytes_billed",
+        )
+    ):
+        raise CandidateStatisticsV2ExistingJobNotReconcilable()
+    expected_cost_fields = {
+        "status": "within_budget",
+        "within_budget": True,
+        "query_sha256": request.expected_query_sha256,
+        "schema_sha256": request.expected_schema_sha256,
+        "dry_run_bytes": request.expected_dry_run_bytes,
+        "successful_query_jobs": request.expected_successful_query_jobs,
+        "month_to_date_billed_bytes": (
+            request.expected_month_to_date_billed_bytes
+        ),
+        "sandbox_budget_bytes": request.monthly_processing_budget_bytes,
+        "reserve_bytes": request.reserve_bytes,
+        "projected_month_to_date_bytes": (
+            request.expected_month_to_date_billed_bytes
+            + request.expected_dry_run_bytes
+        ),
+        "projected_reserve_bytes": (
+            request.monthly_processing_budget_bytes
+            - request.expected_month_to_date_billed_bytes
+            - request.expected_dry_run_bytes
+        ),
+        "blocking_reasons": (),
+    }
+    cost_payload = cost.model_dump(mode="python")
+    if any(
+        cost_payload.get(field) != expected
+        for field, expected in expected_cost_fields.items()
+    ):
+        raise CandidateStatisticsV2ExistingJobNotReconcilable()
+    return cost
 
 
 def _validate_plan(

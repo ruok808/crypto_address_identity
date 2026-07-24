@@ -29,6 +29,8 @@ from crypto_address_identity.universe.candidate_execution_v2 import (
     PINNED_V2_MONTHLY_PROCESSING_BUDGET_BYTES,
     PINNED_V2_MONTHLY_RESERVE_BYTES,
     CandidateStatisticsV2ExecutionAlreadyAttempted,
+    CandidateStatisticsV2ExistingJobNotReconcilable,
+    CandidateStatisticsV2ExistingJobReconciler,
     CandidateStatisticsV2RecoveryEvidenceInvalid,
     CandidateStatisticsV2ExecutionRequest,
     CandidateStatisticsV2OneShotExecutor,
@@ -179,6 +181,7 @@ class FakeV2ExecutionBackend:
         execution_processed_bytes: int = PINNED_V2_DRY_RUN_BYTES,
         execution_billed_bytes: int = PINNED_V2_DRY_RUN_BYTES,
         fail_execution: bool = False,
+        fail_existing_job_fetch: bool = False,
     ) -> None:
         self.rows = rows if rows is not None else (execution_result_row(),)
         self.dry_run_bytes = dry_run_bytes
@@ -187,6 +190,7 @@ class FakeV2ExecutionBackend:
         self.execution_processed_bytes = execution_processed_bytes
         self.execution_billed_bytes = execution_billed_bytes
         self.fail_execution = fail_execution
+        self.fail_existing_job_fetch = fail_existing_job_fetch
         self.calls: list[str] = []
         self.receipt_path: Path | None = None
 
@@ -255,6 +259,23 @@ class FakeV2ExecutionBackend:
             total_bytes_billed=self.execution_billed_bytes,
         )
 
+    def fetch_existing_aggregate_at_most_two_no_retry(
+        self,
+        *,
+        job_id: str,
+        timeout_seconds: float,
+    ) -> AggregateQueryExecution:
+        self.calls.append("fetch_existing_aggregate_at_most_two_no_retry")
+        assert job_id.startswith("cai_btc_importance_v2_")
+        assert timeout_seconds == 120.0
+        if self.fail_existing_job_fetch:
+            raise RuntimeError("raw upstream error must not escape")
+        return AggregateQueryExecution(
+            rows=self.rows,
+            total_bytes_processed=self.execution_processed_bytes,
+            total_bytes_billed=self.execution_billed_bytes,
+        )
+
 
 def executor(
     tmp_path: Path,
@@ -270,6 +291,128 @@ def executor(
         backend=backend,
         dataset="bigquery-public-data.crypto_bitcoin",
         receipt_root=receipt_root,
+        max_source_age=timedelta(hours=48),
+        now=NOW,
+    )
+
+
+def write_started_recovery_receipt(
+    tmp_path: Path,
+    *,
+    changes: dict[str, object] | None = None,
+) -> Path:
+    request = recovery_request(
+        previous_receipt_sha256=PINNED_V2_FAILED_RECEIPT_SHA256,
+    )
+    receipt_path = (
+        tmp_path
+        / "executions"
+        / f"{request.authorization_id}.json"
+    )
+    payload: dict[str, object] = {
+        "schema_version": (
+            "btc_candidate_statistics_v2_execution_receipt_v1"
+        ),
+        "status": "started",
+        "authorization_id": request.authorization_id,
+        "job_id": (
+            "cai_btc_importance_v2_"
+            "b2bf4b71772b68d2d2e7f7ec2303745a48d69d74"
+        ),
+        "created_at": NOW.isoformat().replace("+00:00", "Z"),
+        "billing_acknowledged": True,
+        "query_sha256": request.expected_query_sha256,
+        "expected_schema_sha256": request.expected_schema_sha256,
+        "expected_source_standard_address_count": (
+            request.expected_source_standard_address_count
+        ),
+        "expected_source_input_only_address_count": (
+            request.expected_source_input_only_address_count
+        ),
+        "expected_dry_run_bytes": request.expected_dry_run_bytes,
+        "expected_successful_query_jobs": (
+            request.expected_successful_query_jobs
+        ),
+        "expected_month_to_date_billed_bytes": (
+            request.expected_month_to_date_billed_bytes
+        ),
+        "cutoff_height": request.cutoff_height,
+        "cutoff_time": request.cutoff_time.isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        "maximum_bytes_billed": request.maximum_bytes_billed,
+        "monthly_processing_budget_bytes": (
+            request.monthly_processing_budget_bytes
+        ),
+        "reserve_bytes": request.reserve_bytes,
+        "cost_estimate": {
+            "source_kind": "bigquery",
+            "query_kind": "btc_candidate_statistics_v2",
+            "policy_version": "btc_importance_v2",
+            "status": "within_budget",
+            "query_sha256": request.expected_query_sha256,
+            "schema_sha256": request.expected_schema_sha256,
+            "dry_run_bytes": request.expected_dry_run_bytes,
+            "successful_query_jobs": (
+                request.expected_successful_query_jobs
+            ),
+            "month_to_date_billed_bytes": (
+                request.expected_month_to_date_billed_bytes
+            ),
+            "sandbox_budget_bytes": (
+                request.monthly_processing_budget_bytes
+            ),
+            "reserve_bytes": request.reserve_bytes,
+            "projected_month_to_date_bytes": (
+                request.expected_month_to_date_billed_bytes
+                + request.expected_dry_run_bytes
+            ),
+            "projected_reserve_bytes": (
+                request.monthly_processing_budget_bytes
+                - request.expected_month_to_date_billed_bytes
+                - request.expected_dry_run_bytes
+            ),
+            "within_budget": True,
+            "read_only": True,
+            "network_requests": 3,
+            "blocking_reasons": [],
+            "warnings": [],
+        },
+        "automatic_retries": 0,
+        "candidate_materialized": False,
+        "recovery_from_authorization_id": (
+            request.recovery_from_authorization_id
+        ),
+        "expected_previous_receipt_sha256": (
+            request.expected_previous_receipt_sha256
+        ),
+        "expected_previous_job_id": request.expected_previous_job_id,
+        "expected_previous_job_error_reason": (
+            request.expected_previous_job_error_reason
+        ),
+        "expected_previous_job_total_bytes_processed": 0,
+        "expected_previous_job_total_bytes_billed": 0,
+        "recovery_evidence_validated": True,
+    }
+    payload.update(changes or {})
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="ascii",
+    )
+    receipt_path.chmod(0o600)
+    return receipt_path
+
+
+def reconciler(
+    tmp_path: Path,
+    backend: FakeV2ExecutionBackend,
+) -> CandidateStatisticsV2ExistingJobReconciler:
+    return CandidateStatisticsV2ExistingJobReconciler(
+        backend=backend,
+        dataset="bigquery-public-data.crypto_bitcoin",
+        receipt_root=tmp_path / "executions",
         max_source_age=timedelta(hours=48),
         now=NOW,
     )
@@ -451,6 +594,99 @@ def test_v2_recovery_missing_previous_receipt_blocks_before_network(
     assert backend.calls == []
     assert backend.receipt_path is not None
     assert not backend.receipt_path.exists()
+
+
+def test_v2_reconciler_finishes_only_the_existing_started_job(
+    tmp_path: Path,
+) -> None:
+    receipt_path = write_started_recovery_receipt(tmp_path)
+    backend = FakeV2ExecutionBackend()
+
+    outcome = reconciler(tmp_path, backend).run(
+        recovery_request(
+            previous_receipt_sha256=PINNED_V2_FAILED_RECEIPT_SHA256,
+        )
+    )
+
+    assert outcome.status == "completed"
+    assert outcome.row_count == 1
+    assert outcome.execution_calls == 1
+    assert outcome.automatic_retries == 0
+    assert outcome.total_bytes_processed == PINNED_V2_DRY_RUN_BYTES
+    assert outcome.candidate_materialized is False
+    assert backend.calls == [
+        "fetch_existing_aggregate_at_most_two_no_retry",
+    ]
+    receipt = json.loads(receipt_path.read_text(encoding="ascii"))
+    assert receipt["status"] == "completed"
+    assert receipt["job_id"] == outcome.job_id
+    assert receipt["row_count"] == 1
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_v2_reconciler_rejects_receipt_drift_before_network(
+    tmp_path: Path,
+) -> None:
+    receipt_path = write_started_recovery_receipt(
+        tmp_path,
+        changes={"job_id": "different_job"},
+    )
+    original = receipt_path.read_bytes()
+    backend = FakeV2ExecutionBackend()
+
+    with pytest.raises(CandidateStatisticsV2ExistingJobNotReconcilable):
+        reconciler(tmp_path, backend).run(
+            recovery_request(
+                previous_receipt_sha256=PINNED_V2_FAILED_RECEIPT_SHA256,
+            )
+        )
+
+    assert backend.calls == []
+    assert receipt_path.read_bytes() == original
+
+
+def test_v2_reconciler_fetch_failure_leaves_started_receipt_retryable(
+    tmp_path: Path,
+) -> None:
+    receipt_path = write_started_recovery_receipt(tmp_path)
+    original = receipt_path.read_bytes()
+    backend = FakeV2ExecutionBackend(fail_existing_job_fetch=True)
+
+    with pytest.raises(CandidateStatisticsV2ExistingJobNotReconcilable):
+        reconciler(tmp_path, backend).run(
+            recovery_request(
+                previous_receipt_sha256=PINNED_V2_FAILED_RECEIPT_SHA256,
+            )
+        )
+
+    assert backend.calls == [
+        "fetch_existing_aggregate_at_most_two_no_retry",
+    ]
+    assert receipt_path.read_bytes() == original
+
+
+def test_v2_reconciler_applies_quality_gate_before_finishing_receipt(
+    tmp_path: Path,
+) -> None:
+    receipt_path = write_started_recovery_receipt(tmp_path)
+    backend = FakeV2ExecutionBackend(
+        execution_processed_bytes=PINNED_V2_DRY_RUN_BYTES - 1,
+    )
+
+    outcome = reconciler(tmp_path, backend).run(
+        recovery_request(
+            previous_receipt_sha256=PINNED_V2_FAILED_RECEIPT_SHA256,
+        )
+    )
+
+    assert outcome.status == "quality_blocked"
+    assert (
+        "candidate_statistics_v2_execution_processed_bytes_mismatch"
+        in outcome.blocking_reasons
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="ascii"))
+    assert receipt["status"] == "quality_blocked"
+    assert receipt["candidate_materialized"] is False
 
 
 @pytest.mark.parametrize(

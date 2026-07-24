@@ -75,6 +75,8 @@ from crypto_address_identity.universe.candidate_execution import (
 )
 from crypto_address_identity.universe.candidate_execution_v2 import (
     CandidateStatisticsV2ExecutionAlreadyAttempted,
+    CandidateStatisticsV2ExistingJobNotReconcilable,
+    CandidateStatisticsV2ExistingJobReconciler,
     CandidateStatisticsV2ExecutionRequest,
     CandidateStatisticsV2OneShotExecutor,
     CandidateStatisticsV2RecoveryEvidenceInvalid,
@@ -429,6 +431,10 @@ def build_parser() -> argparse.ArgumentParser:
     candidate_execution_v2_mode.add_argument("--dry-run", action="store_true")
     candidate_execution_v2_mode.add_argument(
         "--execute-once",
+        action="store_true",
+    )
+    candidate_execution_v2_mode.add_argument(
+        "--reconcile-existing-job",
         action="store_true",
     )
     universe_execute_candidate_statistics_v2.add_argument(
@@ -1257,6 +1263,23 @@ def _handle_universe_execute_bigquery_candidate_statistics_v2(
             dataset=settings.bigquery_dataset,
             receipt_root=receipt_root,
         )
+    elif arguments.reconcile_existing_job:
+        try:
+            outcome = CandidateStatisticsV2ExistingJobReconciler(
+                backend=_make_bigquery_backend(settings),
+                dataset=settings.bigquery_dataset,
+                receipt_root=receipt_root,
+                max_source_age=timedelta(
+                    hours=settings.universe_max_source_age_hours
+                ),
+            ).run(request)
+        except CandidateStatisticsV2ExistingJobNotReconcilable as exc:
+            raise CliError(
+                "candidate v2 existing job cannot be safely reconciled",
+                error_code=(
+                    "candidate_v2_existing_job_not_reconcilable"
+                ),
+            ) from exc
     else:
         try:
             outcome = CandidateStatisticsV2OneShotExecutor(

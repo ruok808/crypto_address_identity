@@ -122,6 +122,13 @@ class BigQueryBackend(Protocol):
         job_id: str,
     ) -> AggregateQueryExecution: ...
 
+    def fetch_existing_aggregate_at_most_two_no_retry(
+        self,
+        *,
+        job_id: str,
+        timeout_seconds: float,
+    ) -> AggregateQueryExecution: ...
+
     def query_one(
         self,
         sql: str,
@@ -762,6 +769,52 @@ class GoogleBigQueryBackend:
         except Exception as exc:
             raise BigQueryBoundaryError(
                 "BigQuery one-shot aggregate query failed"
+            ) from exc
+        return AggregateQueryExecution(
+            rows=rows,
+            total_bytes_processed=int(job.total_bytes_processed or 0),
+            total_bytes_billed=int(job.total_bytes_billed or 0),
+        )
+
+    def fetch_existing_aggregate_at_most_two_no_retry(
+        self,
+        *,
+        job_id: str,
+        timeout_seconds: float,
+    ) -> AggregateQueryExecution:
+        if not job_id or len(job_id) > 1_024:
+            raise BigQueryBoundaryError("BigQuery job id is invalid")
+        if timeout_seconds <= 0 or timeout_seconds > 300:
+            raise BigQueryBoundaryError(
+                "BigQuery existing-job timeout is invalid"
+            )
+        try:
+            job = self._client.get_job(job_id)
+            if str(getattr(job, "job_id", "")) != job_id:
+                raise BigQueryBoundaryError(
+                    "BigQuery existing job id did not match"
+                )
+            if str(getattr(job, "state", "")).upper() != "DONE":
+                raise BigQueryBoundaryError(
+                    "BigQuery existing job is not complete"
+                )
+            if getattr(job, "error_result", None) is not None:
+                raise BigQueryBoundaryError(
+                    "BigQuery existing job did not succeed"
+                )
+            result = job.result(
+                page_size=2,
+                max_results=2,
+                retry=None,
+                job_retry=None,
+                timeout=timeout_seconds,
+            )
+            rows = tuple(_normalize_bigquery_row(row) for row in result)
+        except BigQueryBoundaryError:
+            raise
+        except Exception as exc:
+            raise BigQueryBoundaryError(
+                "BigQuery existing aggregate result is unavailable"
             ) from exc
         return AggregateQueryExecution(
             rows=rows,

@@ -599,3 +599,71 @@ def test_google_backend_one_shot_aggregate_disables_all_retries() -> None:
     )
     assert result.total_bytes_processed == 637_999_682_243
     assert result.total_bytes_billed == 637_999_682_243
+
+
+def test_google_backend_fetches_existing_job_without_query_submission() -> None:
+    class FakeNestedRow:
+        def items(self):
+            return (("mask", 1), ("address_count", 2))
+
+    class FakeRow:
+        def items(self):
+            return (
+                ("contract_version", "btc_candidate_statistics_v2"),
+                ("p0_overlap_distribution", [FakeNestedRow()]),
+            )
+
+    class FakeJob:
+        job_id = "cai_btc_importance_v2_fixture"
+        state = "DONE"
+        error_result = None
+        total_bytes_processed = 637_999_682_243
+        total_bytes_billed = 637_999_775_744
+
+        def __init__(self) -> None:
+            self.result_arguments: dict[str, object] = {}
+
+        def result(self, **arguments: object) -> list[FakeRow]:
+            self.result_arguments = arguments
+            return [FakeRow()]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.get_job_arguments: tuple[object, ...] | None = None
+            self.job = FakeJob()
+
+        def get_job(self, *arguments: object) -> FakeJob:
+            self.get_job_arguments = arguments
+            return self.job
+
+        def query(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("existing-job fetch must not submit a query")
+
+    backend = object.__new__(GoogleBigQueryBackend)
+    backend._client = FakeClient()
+
+    result = backend.fetch_existing_aggregate_at_most_two_no_retry(
+        job_id="cai_btc_importance_v2_fixture",
+        timeout_seconds=120.0,
+    )
+
+    assert backend._client.get_job_arguments == (
+        "cai_btc_importance_v2_fixture",
+    )
+    assert backend._client.job.result_arguments == {
+        "page_size": 2,
+        "max_results": 2,
+        "retry": None,
+        "job_retry": None,
+        "timeout": 120.0,
+    }
+    assert result.rows == (
+        {
+            "contract_version": "btc_candidate_statistics_v2",
+            "p0_overlap_distribution": [
+                {"mask": 1, "address_count": 2},
+            ],
+        },
+    )
+    assert result.total_bytes_processed == 637_999_682_243
+    assert result.total_bytes_billed == 637_999_775_744
