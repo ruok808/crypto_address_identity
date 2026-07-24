@@ -155,7 +155,7 @@ def test_coverage_execute_fans_out_entities_without_repeating_fresh_detail_or_ad
             return httpx.Response(200, json={"entity": {"id": "binance", "name": "Binance", "type": "exchange"}})
         if request.url.path.endswith("/entity_predictions/binance"):
             return httpx.Response(200, json={"addresses": [SECOND_BTC_ADDRESS, {"address": THIRD_BTC_ADDRESS}]})
-        if request.url.path.endswith(f"/address_enriched/{BTC_ADDRESS}"):
+        if request.url.path.endswith(f"/address_enriched/{BTC_ADDRESS}/all"):
             return httpx.Response(
                 200,
                 json={
@@ -166,12 +166,12 @@ def test_coverage_execute_fans_out_entities_without_repeating_fresh_detail_or_ad
                     }
                 },
             )
-        if request.url.path.endswith(f"/address_enriched/{SECOND_BTC_ADDRESS}"):
+        if request.url.path.endswith(f"/address_enriched/{SECOND_BTC_ADDRESS}/all"):
             return httpx.Response(
                 200,
                 json={"bitcoin": {"address": SECOND_BTC_ADDRESS, "chain": "bitcoin"}},
             )
-        if request.url.path.endswith(f"/address_enriched/{THIRD_BTC_ADDRESS}"):
+        if request.url.path.endswith(f"/address_enriched/{THIRD_BTC_ADDRESS}/all"):
             return httpx.Response(
                 200,
                 json={"bitcoin": {"address": THIRD_BTC_ADDRESS, "chain": "bitcoin"}},
@@ -222,7 +222,7 @@ def test_malformed_address_enrichment_does_not_enter_the_ttl_cache(env_mapping: 
             return httpx.Response(200, json={"entity": {"id": "binance"}})
         if request.url.path.endswith("/entity_predictions/binance"):
             return httpx.Response(200, json={"addresses": [SECOND_BTC_ADDRESS]})
-        if request.url.path.endswith(f"/address_enriched/{BTC_ADDRESS}"):
+        if request.url.path.endswith(f"/address_enriched/{BTC_ADDRESS}/all"):
             return httpx.Response(200, json={"bitcoin": {"address": BTC_ADDRESS, "chain": "ethereum"}})
         return httpx.Response(404, json={})
 

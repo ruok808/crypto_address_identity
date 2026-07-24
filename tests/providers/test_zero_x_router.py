@@ -182,7 +182,7 @@ def test_timeout_exhaustion_is_reported_as_transport_error(env_mapping: dict[str
     assert calls == 2
 
 
-def test_coverage_requests_stay_on_btc_routes_and_disable_unneeded_expansions(
+def test_coverage_requests_use_the_live_validated_btc_all_profile(
     env_mapping: dict[str, str]
 ) -> None:
     client = ZeroXRouterClient(
@@ -196,11 +196,10 @@ def test_coverage_requests_stay_on_btc_routes_and_disable_unneeded_expansions(
         entity_types=("exchange", "fund"), interval="30d", order_by="balanceUsdChange"
     )
 
-    assert enrichment.url.path.endswith(f"/address_enriched/{BTC_ADDRESS}")
-    assert not enrichment.url.path.endswith("/all")
+    assert enrichment.url.path.endswith(f"/address_enriched/{BTC_ADDRESS}/all")
     assert enrichment.url.params["includeTags"] == "true"
-    assert enrichment.url.params["includeEntityPredictions"] == "false"
-    assert enrichment.url.params["includeClusters"] == "false"
+    assert enrichment.url.params["includeEntityPredictions"] == "true"
+    assert enrichment.url.params["includeClusters"] == "true"
     assert predictions.url.path.endswith("/entity_predictions/binance")
     assert ranking.url.params["chains"] == "bitcoin"
     assert ranking.url.params["entityTypes"] == "exchange,fund"

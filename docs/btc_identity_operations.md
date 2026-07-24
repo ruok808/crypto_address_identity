@@ -64,8 +64,9 @@ coverage rather than claiming an all-Arkham export. Its bounded stages are:
    memberships, not silently promoted to direct address labels.
 3. Enrich only due addresses from the existing candidate queue and the stored
    entity-prediction fan-out. Candidate requests win priority; predicted
-   addresses fill the remaining bounded capacity. The sync uses the single-chain
-   address route and disables clusters and per-address predictions.
+   addresses fill the remaining bounded capacity. It uses the live-validated
+   BTC `address_enriched/{address}/all` profile with tags, predictions, and
+   clusters enabled; response budgets and TTLs bound the richer payload.
 
 Seed provider entity IDs through an append-only NDJSON handoff:
 

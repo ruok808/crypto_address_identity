@@ -86,19 +86,23 @@ class ZeroXRouterClient:
         return self.fetch_request(request)
 
     def build_btc_coverage_enrichment_request(self, address: str) -> httpx.Request:
-        """Build the smallest label-bearing BTC request supported by Chaindata.
+        """Build the live-validated full BTC identity request.
 
-        The coverage sync intentionally avoids the multi-chain ``/all`` route,
-        cluster payloads, and per-address entity-prediction payloads.
+        The provider's documented ``/all`` request with all three expansions is
+        the only address-enriched shape validated against the configured token.
+        The response budget and TTL cache bound its cost; callers must not
+        substitute an unvalidated smaller request profile.
         """
 
         subject = normalize_bitcoin_address(address)
         return self._build_authenticated_request(
-            "/chaindata/intelligence/address_enriched/" + quote(subject.normalized_address, safe=""),
+            "/chaindata/intelligence/address_enriched/"
+            + quote(subject.normalized_address, safe="")
+            + "/all",
             params={
                 "includeTags": "true",
-                "includeEntityPredictions": "false",
-                "includeClusters": "false",
+                "includeEntityPredictions": "true",
+                "includeClusters": "true",
             },
         )
 
