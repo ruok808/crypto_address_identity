@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from datetime import UTC, date, datetime, time, timedelta
@@ -17,13 +18,18 @@ from crypto_address_identity.universe.bigquery import (
 from crypto_address_identity.universe.candidate_execution_v2 import (
     CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
     CANDIDATE_STATISTICS_V2_MAXIMUM_BYTES_BILLED,
+    CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID,
     PINNED_V2_CANDIDATE_QUERY_SHA256,
     PINNED_V2_CANDIDATE_SCHEMA_SHA256,
     PINNED_V2_CUTOFF_DATE,
     PINNED_V2_DRY_RUN_BYTES,
+    PINNED_V2_FAILED_JOB_ERROR_REASON,
+    PINNED_V2_FAILED_JOB_ID,
+    PINNED_V2_FAILED_RECEIPT_SHA256,
     PINNED_V2_MONTHLY_PROCESSING_BUDGET_BYTES,
     PINNED_V2_MONTHLY_RESERVE_BYTES,
     CandidateStatisticsV2ExecutionAlreadyAttempted,
+    CandidateStatisticsV2RecoveryEvidenceInvalid,
     CandidateStatisticsV2ExecutionRequest,
     CandidateStatisticsV2OneShotExecutor,
     preview_candidate_statistics_v2_execution,
@@ -137,6 +143,29 @@ def execution_request(
     return CandidateStatisticsV2ExecutionRequest.model_validate(values)
 
 
+def recovery_request(
+    *,
+    previous_receipt_sha256: str,
+    **changes: object,
+) -> CandidateStatisticsV2ExecutionRequest:
+    values: dict[str, object] = {
+        **execution_request().model_dump(mode="python"),
+        "authorization_id": CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID,
+        "recovery_from_authorization_id": (
+            CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID
+        ),
+        "expected_previous_receipt_sha256": previous_receipt_sha256,
+        "expected_previous_job_id": PINNED_V2_FAILED_JOB_ID,
+        "expected_previous_job_error_reason": (
+            PINNED_V2_FAILED_JOB_ERROR_REASON
+        ),
+        "expected_previous_job_total_bytes_processed": 0,
+        "expected_previous_job_total_bytes_billed": 0,
+    }
+    values.update(changes)
+    return CandidateStatisticsV2ExecutionRequest.model_validate(values)
+
+
 class FakeV2ExecutionBackend:
     def __init__(
         self,
@@ -230,10 +259,12 @@ class FakeV2ExecutionBackend:
 def executor(
     tmp_path: Path,
     backend: FakeV2ExecutionBackend,
+    *,
+    authorization_id: str = CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
 ) -> CandidateStatisticsV2OneShotExecutor:
     receipt_root = tmp_path / "executions"
     backend.receipt_path = (
-        receipt_root / f"{CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID}.json"
+        receipt_root / f"{authorization_id}.json"
     )
     return CandidateStatisticsV2OneShotExecutor(
         backend=backend,
@@ -290,6 +321,136 @@ def test_v2_existing_receipt_blocks_before_network(tmp_path: Path) -> None:
         service.run(execution_request())
 
     assert backend.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("expected_previous_receipt_sha256", "11" * 32),
+        ("expected_previous_job_id", "different_job"),
+        ("expected_previous_job_error_reason", "different_reason"),
+        ("expected_previous_job_total_bytes_processed", 1),
+        ("expected_previous_job_total_bytes_billed", 1),
+    ],
+)
+def test_v2_recovery_requires_exact_pinned_failure_evidence(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        recovery_request(
+            previous_receipt_sha256=PINNED_V2_FAILED_RECEIPT_SHA256,
+            **{field: value},
+        )
+
+
+def test_v2_recovery_validates_previous_receipt_before_network(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_receipt = {
+        "schema_version": "btc_candidate_statistics_v2_execution_receipt_v1",
+        "status": "failed",
+        "authorization_id": CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
+        "job_id": PINNED_V2_FAILED_JOB_ID,
+        "query_sha256": PINNED_V2_CANDIDATE_QUERY_SHA256,
+        "expected_schema_sha256": PINNED_V2_CANDIDATE_SCHEMA_SHA256,
+        "expected_dry_run_bytes": PINNED_V2_DRY_RUN_BYTES,
+        "maximum_bytes_billed": (
+            CANDIDATE_STATISTICS_V2_MAXIMUM_BYTES_BILLED
+        ),
+        "execution_calls": 1,
+        "automatic_retries": 0,
+        "candidate_materialized": False,
+    }
+    encoded = (
+        json.dumps(
+            previous_receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("ascii")
+    previous_sha256 = hashlib.sha256(encoded).hexdigest()
+    monkeypatch.setattr(
+        "crypto_address_identity.universe.candidate_execution_v2."
+        "PINNED_V2_FAILED_RECEIPT_SHA256",
+        previous_sha256,
+    )
+    previous_path = (
+        tmp_path
+        / "executions"
+        / f"{CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID}.json"
+    )
+    previous_path.parent.mkdir(parents=True)
+    previous_path.write_bytes(encoded)
+    previous_path.chmod(0o600)
+    request = recovery_request(
+        previous_receipt_sha256=previous_sha256,
+    )
+    backend = FakeV2ExecutionBackend()
+    service = executor(
+        tmp_path,
+        backend,
+        authorization_id=CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID,
+    )
+
+    outcome = service.run(request)
+
+    assert outcome.status == "completed"
+    assert outcome.authorization_id == (
+        CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID
+    )
+    assert outcome.recovery_from_authorization_id == (
+        CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID
+    )
+    assert outcome.recovery_evidence_validated is True
+    assert outcome.job_id != PINNED_V2_FAILED_JOB_ID
+    assert backend.calls == [
+        "table_metadata",
+        "monthly_successful_query_usage",
+        "dry_run",
+        "execute_aggregate_at_most_two_no_retry",
+    ]
+    assert backend.receipt_path is not None
+    receipt = json.loads(
+        backend.receipt_path.read_text(encoding="utf-8")
+    )
+    assert receipt["recovery_evidence_validated"] is True
+    assert receipt["expected_previous_receipt_sha256"] == previous_sha256
+
+    with pytest.raises(CandidateStatisticsV2ExecutionAlreadyAttempted):
+        service.run(request)
+    assert backend.calls.count(
+        "execute_aggregate_at_most_two_no_retry"
+    ) == 1
+
+
+def test_v2_recovery_missing_previous_receipt_blocks_before_network(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_sha256 = "22" * 32
+    monkeypatch.setattr(
+        "crypto_address_identity.universe.candidate_execution_v2."
+        "PINNED_V2_FAILED_RECEIPT_SHA256",
+        previous_sha256,
+    )
+    backend = FakeV2ExecutionBackend()
+    service = executor(
+        tmp_path,
+        backend,
+        authorization_id=CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID,
+    )
+
+    with pytest.raises(CandidateStatisticsV2RecoveryEvidenceInvalid):
+        service.run(
+            recovery_request(previous_receipt_sha256=previous_sha256)
+        )
+
+    assert backend.calls == []
+    assert backend.receipt_path is not None
+    assert not backend.receipt_path.exists()
 
 
 @pytest.mark.parametrize(

@@ -197,6 +197,42 @@ mode-0600 receipt before query submission, uses a deterministic job id, and
 sets both query and result retries to none. Any receipt permanently consumes
 the authorization, including `started`, `failed`, or `quality_blocked`.
 
+The only reviewed recovery from the July 24 Sandbox quota rejection uses a
+separate authorization and job id. The original failed receipt is immutable
+and must remain present with mode `0600` and SHA-256
+`80fe04a3ca6be426f4fbb1c2c5705674b54059589d49e91e731449afd771b661`.
+The recovery request also pins the original cloud job to
+`quotaExceeded`, zero processed bytes, and zero billed bytes:
+
+```bash
+cai universe execute bigquery-candidate-statistics-v2 --dry-run \
+  --authorization-id btc-importance-v2-20260724-quota-recovery-one-shot \
+  --acknowledge-billed-execution \
+  --as-of-date 2026-07-24 --cutoff-height 959187 \
+  --expected-query-sha256 47b0b8977cc1443578bc3daf3f90a2cf5e0e48ae758a4b7a133d3caa7d301e74 \
+  --expected-schema-sha256 7353193a75b43704d273b8bcfc4a0d4d56fc9cdc6623704bb25855a0f439dfb7 \
+  --expected-source-address-count 1557941780 \
+  --expected-input-only-address-count 3 \
+  --expected-dry-run-bytes 637999682243 \
+  --expected-successful-query-jobs 5 \
+  --expected-month-to-date-billed-bytes 838768525312 \
+  --maximum-bytes-billed 650000000000 \
+  --monthly-processing-budget-bytes 2000000000000 \
+  --reserve-bytes 250000000000 \
+  --recovery-from-authorization-id btc-importance-v2-20260724-one-shot \
+  --expected-previous-receipt-sha256 80fe04a3ca6be426f4fbb1c2c5705674b54059589d49e91e731449afd771b661 \
+  --expected-previous-job-id cai_btc_importance_v2_5bf66cb53c91d059f860e2c44865303383ba694d \
+  --expected-previous-job-error-reason quotaExceeded \
+  --expected-previous-job-total-bytes-processed 0 \
+  --expected-previous-job-total-bytes-billed 0
+```
+
+The executor validates the prior receipt before any BigQuery metadata or query
+request. Replace `--dry-run` with `--execute-once` only after independently
+rechecking the immutable cloud-job evidence and a fresh live cost probe. The
+recovery receipt also permanently consumes this second authorization; there is
+no supported third attempt.
+
 The one-shot command can return one identifier-free aggregate row only. It has
 no destination table, address export, provider call, candidate materialization,
 or consumer effect. A successful live dry run still proves only compilation

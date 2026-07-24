@@ -21,9 +21,13 @@ from crypto_address_identity.universe.candidate_execution import (
 from crypto_address_identity.universe.candidate_execution_v2 import (
     CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
     CANDIDATE_STATISTICS_V2_MAXIMUM_BYTES_BILLED,
+    CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID,
     PINNED_V2_CANDIDATE_QUERY_SHA256,
     PINNED_V2_CANDIDATE_SCHEMA_SHA256,
     PINNED_V2_DRY_RUN_BYTES,
+    PINNED_V2_FAILED_JOB_ERROR_REASON,
+    PINNED_V2_FAILED_JOB_ID,
+    PINNED_V2_FAILED_RECEIPT_SHA256,
     PINNED_V2_MONTHLY_PROCESSING_BUDGET_BYTES,
     PINNED_V2_MONTHLY_RESERVE_BYTES,
 )
@@ -323,6 +327,33 @@ def _candidate_execution_v2_arguments(mode: str) -> list[str]:
         "--reserve-bytes",
         str(PINNED_V2_MONTHLY_RESERVE_BYTES),
     ]
+
+
+def _candidate_execution_v2_recovery_arguments(mode: str) -> list[str]:
+    arguments = _candidate_execution_v2_arguments(mode)
+    authorization_index = arguments.index(
+        CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID
+    )
+    arguments[authorization_index] = (
+        CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID
+    )
+    arguments.extend(
+        [
+            "--recovery-from-authorization-id",
+            CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
+            "--expected-previous-receipt-sha256",
+            PINNED_V2_FAILED_RECEIPT_SHA256,
+            "--expected-previous-job-id",
+            PINNED_V2_FAILED_JOB_ID,
+            "--expected-previous-job-error-reason",
+            PINNED_V2_FAILED_JOB_ERROR_REASON,
+            "--expected-previous-job-total-bytes-processed",
+            "0",
+            "--expected-previous-job-total-bytes-billed",
+            "0",
+        ]
+    )
+    return arguments
 
 
 def test_bigquery_offline_probe_does_not_construct_backend_or_write(
@@ -834,6 +865,41 @@ def test_bigquery_candidate_statistics_v2_execution_preview_is_offline(
     assert output["execution_calls"] == 0
     assert output["automatic_retries"] == 0
     assert output["candidate_materialized"] is False
+    assert output["written_paths"] == []
+    assert not (tmp_path / "universe").exists()
+
+
+def test_bigquery_candidate_statistics_v2_recovery_preview_is_offline(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: (_ for _ in ()).throw(
+            AssertionError("network boundary")
+        ),
+    )
+
+    exit_code = main(
+        _candidate_execution_v2_recovery_arguments("--dry-run")
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "dry_run"
+    assert output["authorization_id"] == (
+        CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID
+    )
+    assert output["recovery_from_authorization_id"] == (
+        CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID
+    )
+    assert output["expected_previous_receipt_sha256"] == (
+        PINNED_V2_FAILED_RECEIPT_SHA256
+    )
+    assert output["recovery_evidence_validated"] is False
+    assert output["execution_calls"] == 0
     assert output["written_paths"] == []
     assert not (tmp_path / "universe").exists()
 

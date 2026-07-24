@@ -77,6 +77,7 @@ from crypto_address_identity.universe.candidate_execution_v2 import (
     CandidateStatisticsV2ExecutionAlreadyAttempted,
     CandidateStatisticsV2ExecutionRequest,
     CandidateStatisticsV2OneShotExecutor,
+    CandidateStatisticsV2RecoveryEvidenceInvalid,
     preview_candidate_statistics_v2_execution,
 )
 from crypto_address_identity.universe.features import (
@@ -494,6 +495,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--reserve-bytes",
         type=int,
         required=True,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--recovery-from-authorization-id",
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-previous-receipt-sha256",
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-previous-job-id",
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-previous-job-error-reason",
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-previous-job-total-bytes-processed",
+        type=int,
+    )
+    universe_execute_candidate_statistics_v2.add_argument(
+        "--expected-previous-job-total-bytes-billed",
+        type=int,
     )
     universe_execute_candidate_statistics_v2.set_defaults(
         handler=_handle_universe_execute_bigquery_candidate_statistics_v2
@@ -1212,6 +1233,22 @@ def _handle_universe_execute_bigquery_candidate_statistics_v2(
             arguments.monthly_processing_budget_bytes
         ),
         reserve_bytes=arguments.reserve_bytes,
+        recovery_from_authorization_id=(
+            arguments.recovery_from_authorization_id
+        ),
+        expected_previous_receipt_sha256=(
+            arguments.expected_previous_receipt_sha256
+        ),
+        expected_previous_job_id=arguments.expected_previous_job_id,
+        expected_previous_job_error_reason=(
+            arguments.expected_previous_job_error_reason
+        ),
+        expected_previous_job_total_bytes_processed=(
+            arguments.expected_previous_job_total_bytes_processed
+        ),
+        expected_previous_job_total_bytes_billed=(
+            arguments.expected_previous_job_total_bytes_billed
+        ),
     )
     receipt_root = settings.universe_root / "executions"
     if arguments.dry_run:
@@ -1234,6 +1271,11 @@ def _handle_universe_execute_bigquery_candidate_statistics_v2(
             raise CliError(
                 "candidate v2 execution authorization was already attempted",
                 error_code="candidate_v2_execution_already_attempted",
+            ) from exc
+        except CandidateStatisticsV2RecoveryEvidenceInvalid as exc:
+            raise CliError(
+                "candidate v2 recovery evidence is invalid",
+                error_code="candidate_v2_recovery_evidence_invalid",
             ) from exc
     return outcome.model_dump(mode="json")
 

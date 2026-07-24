@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Literal
@@ -30,6 +31,9 @@ from crypto_address_identity.universe.query_plan import BigQueryQueryPlan
 CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID = (
     "btc-importance-v2-20260724-one-shot"
 )
+CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID = (
+    "btc-importance-v2-20260724-quota-recovery-one-shot"
+)
 CANDIDATE_STATISTICS_V2_MAXIMUM_BYTES_BILLED = 650_000_000_000
 PINNED_V2_MONTHLY_PROCESSING_BUDGET_BYTES = 2_000_000_000_000
 PINNED_V2_MONTHLY_RESERVE_BYTES = 250_000_000_000
@@ -41,6 +45,13 @@ PINNED_V2_CANDIDATE_QUERY_SHA256 = (
 PINNED_V2_CANDIDATE_SCHEMA_SHA256 = (
     "7353193a75b43704d273b8bcfc4a0d4d56fc9cdc6623704bb25855a0f439dfb7"
 )
+PINNED_V2_FAILED_RECEIPT_SHA256 = (
+    "80fe04a3ca6be426f4fbb1c2c5705674b54059589d49e91e731449afd771b661"
+)
+PINNED_V2_FAILED_JOB_ID = (
+    "cai_btc_importance_v2_5bf66cb53c91d059f860e2c44865303383ba694d"
+)
+PINNED_V2_FAILED_JOB_ERROR_REASON = "quotaExceeded"
 
 _AUTHORIZATION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -48,6 +59,10 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 class CandidateStatisticsV2ExecutionAlreadyAttempted(RuntimeError):
     """Raised before network use when the one-shot receipt already exists."""
+
+
+class CandidateStatisticsV2RecoveryEvidenceInvalid(RuntimeError):
+    """Raised before network use when quota-recovery evidence is invalid."""
 
 
 class CandidateStatisticsV2ExecutionRequest(UniverseModel):
@@ -65,6 +80,18 @@ class CandidateStatisticsV2ExecutionRequest(UniverseModel):
     maximum_bytes_billed: int = Field(gt=0)
     monthly_processing_budget_bytes: int = Field(gt=0)
     reserve_bytes: int = Field(ge=0)
+    recovery_from_authorization_id: str | None = None
+    expected_previous_receipt_sha256: str | None = None
+    expected_previous_job_id: str | None = None
+    expected_previous_job_error_reason: str | None = None
+    expected_previous_job_total_bytes_processed: int | None = Field(
+        default=None,
+        ge=0,
+    )
+    expected_previous_job_total_bytes_billed: int | None = Field(
+        default=None,
+        ge=0,
+    )
 
     @field_validator("authorization_id")
     @classmethod
@@ -80,16 +107,25 @@ class CandidateStatisticsV2ExecutionRequest(UniverseModel):
             raise ValueError("expected checksum must be a lower-case SHA-256")
         return value
 
+    @field_validator("expected_previous_receipt_sha256")
+    @classmethod
+    def validate_optional_sha256(cls, value: str | None) -> str | None:
+        if value is not None and not _SHA256_RE.fullmatch(value):
+            raise ValueError("expected checksum must be a lower-case SHA-256")
+        return value
+
     @model_validator(mode="after")
     def validate_pinned_contract(
         self,
     ) -> "CandidateStatisticsV2ExecutionRequest":
+        if self.authorization_id not in {
+            CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
+            CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID,
+        }:
+            raise ValueError(
+                "candidate v2 execution authorization id is not authorized"
+            )
         exact_values = (
-            (
-                self.authorization_id,
-                CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
-                "authorization id",
-            ),
             (
                 self.as_of_date,
                 PINNED_V2_CUTOFF_DATE,
@@ -159,6 +195,60 @@ class CandidateStatisticsV2ExecutionRequest(UniverseModel):
             raise ValueError(
                 "candidate v2 execution exceeds the monthly byte budget"
             )
+        recovery_values = (
+            self.recovery_from_authorization_id,
+            self.expected_previous_receipt_sha256,
+            self.expected_previous_job_id,
+            self.expected_previous_job_error_reason,
+            self.expected_previous_job_total_bytes_processed,
+            self.expected_previous_job_total_bytes_billed,
+        )
+        if (
+            self.authorization_id
+            == CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID
+        ):
+            if any(value is not None for value in recovery_values):
+                raise ValueError(
+                    "initial candidate v2 authorization cannot recover"
+                )
+        else:
+            exact_recovery_values = (
+                (
+                    self.recovery_from_authorization_id,
+                    CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
+                    "prior authorization id",
+                ),
+                (
+                    self.expected_previous_receipt_sha256,
+                    PINNED_V2_FAILED_RECEIPT_SHA256,
+                    "prior receipt checksum",
+                ),
+                (
+                    self.expected_previous_job_id,
+                    PINNED_V2_FAILED_JOB_ID,
+                    "prior job id",
+                ),
+                (
+                    self.expected_previous_job_error_reason,
+                    PINNED_V2_FAILED_JOB_ERROR_REASON,
+                    "prior job error reason",
+                ),
+                (
+                    self.expected_previous_job_total_bytes_processed,
+                    0,
+                    "prior processed bytes",
+                ),
+                (
+                    self.expected_previous_job_total_bytes_billed,
+                    0,
+                    "prior billed bytes",
+                ),
+            )
+            for actual, expected, label in exact_recovery_values:
+                if actual != expected:
+                    raise ValueError(
+                        f"candidate v2 recovery {label} is not authorized"
+                    )
         return self
 
     @property
@@ -201,6 +291,19 @@ class CandidateStatisticsV2ExecutionOutcome(UniverseModel):
     network_requests: int = Field(default=0, ge=0, le=4)
     execution_calls: int = Field(default=0, ge=0, le=1)
     automatic_retries: Literal[0] = 0
+    recovery_from_authorization_id: str | None = None
+    expected_previous_receipt_sha256: str | None = None
+    expected_previous_job_id: str | None = None
+    expected_previous_job_error_reason: str | None = None
+    expected_previous_job_total_bytes_processed: int | None = Field(
+        default=None,
+        ge=0,
+    )
+    expected_previous_job_total_bytes_billed: int | None = Field(
+        default=None,
+        ge=0,
+    )
+    recovery_evidence_validated: bool = False
     provider_requests: Literal[0] = 0
     provider_points: Literal[0] = 0
     candidate_materialized: Literal[False] = False
@@ -253,6 +356,31 @@ class CandidateStatisticsV2ExecutionOutcome(UniverseModel):
         ):
             raise ValueError(
                 "quality-blocked outcome requires blocking quality"
+            )
+        is_recovery = (
+            self.authorization_id
+            == CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID
+        )
+        if not is_recovery and (
+            self.recovery_from_authorization_id is not None
+            or self.expected_previous_receipt_sha256 is not None
+            or self.expected_previous_job_id is not None
+            or self.expected_previous_job_error_reason is not None
+            or self.expected_previous_job_total_bytes_processed is not None
+            or self.expected_previous_job_total_bytes_billed is not None
+            or self.recovery_evidence_validated
+        ):
+            raise ValueError(
+                "initial candidate v2 outcome cannot contain recovery evidence"
+            )
+        if (
+            is_recovery
+            and self.status
+            in {"completed", "quality_blocked", "failed"}
+            and not self.recovery_evidence_validated
+        ):
+            raise ValueError(
+                "executed recovery requires validated prior evidence"
             )
         return self
 
@@ -307,6 +435,10 @@ class CandidateStatisticsV2OneShotExecutor:
         )
         if receipt_path.exists():
             raise CandidateStatisticsV2ExecutionAlreadyAttempted()
+        recovery_evidence_validated = _validate_recovery_evidence(
+            self._receipt_root,
+            request,
+        )
 
         cost = BigQueryCandidateStatisticsV2Probe(
             backend=self._backend,
@@ -357,6 +489,7 @@ class CandidateStatisticsV2OneShotExecutor:
                 cost_estimate=cost,
                 blocking_reasons=tuple(preflight_reasons),
                 network_requests=cost.network_requests,
+                recovery_evidence_validated=recovery_evidence_validated,
             )
 
         job_id = _job_id(request)
@@ -399,6 +532,10 @@ class CandidateStatisticsV2OneShotExecutor:
                 "cost_estimate": cost.model_dump(mode="json"),
                 "automatic_retries": 0,
                 "candidate_materialized": False,
+                **_recovery_receipt_fields(
+                    request,
+                    recovery_evidence_validated,
+                ),
             },
         )
 
@@ -430,6 +567,7 @@ class CandidateStatisticsV2OneShotExecutor:
                 network_requests=cost.network_requests + 1,
                 execution_calls=1,
                 written_paths=(str(receipt_path),),
+                recovery_evidence_validated=recovery_evidence_validated,
             )
             _finish_receipt(receipt_path, outcome)
             return outcome
@@ -485,6 +623,7 @@ class CandidateStatisticsV2OneShotExecutor:
             network_requests=cost.network_requests + 1,
             execution_calls=1,
             written_paths=(str(receipt_path),),
+            recovery_evidence_validated=recovery_evidence_validated,
         )
         _finish_receipt(receipt_path, outcome)
         return outcome
@@ -504,9 +643,106 @@ def _validate_plan(
 
 
 def _receipt_path(receipt_root: Path, authorization_id: str) -> Path:
-    if authorization_id != CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID:
+    if authorization_id not in {
+        CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
+        CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID,
+    }:
         raise ValueError("candidate v2 authorization id is not allowed")
     return receipt_root / f"{authorization_id}.json"
+
+
+def _validate_recovery_evidence(
+    receipt_root: Path,
+    request: CandidateStatisticsV2ExecutionRequest,
+) -> bool:
+    if (
+        request.authorization_id
+        != CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID
+    ):
+        return False
+    previous_path = _receipt_path(
+        receipt_root,
+        CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
+    )
+    try:
+        metadata = previous_path.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise CandidateStatisticsV2RecoveryEvidenceInvalid()
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise CandidateStatisticsV2RecoveryEvidenceInvalid()
+        encoded = previous_path.read_bytes()
+        if not encoded or len(encoded) > 1_000_000:
+            raise CandidateStatisticsV2RecoveryEvidenceInvalid()
+        digest = hashlib.sha256(encoded).hexdigest()
+        if (
+            digest != PINNED_V2_FAILED_RECEIPT_SHA256
+            or digest != request.expected_previous_receipt_sha256
+        ):
+            raise CandidateStatisticsV2RecoveryEvidenceInvalid()
+        payload = json.loads(encoded)
+    except (
+        CandidateStatisticsV2RecoveryEvidenceInvalid,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise CandidateStatisticsV2RecoveryEvidenceInvalid() from exc
+    expected_fields = {
+        "schema_version": (
+            "btc_candidate_statistics_v2_execution_receipt_v1"
+        ),
+        "status": "failed",
+        "authorization_id": CANDIDATE_STATISTICS_V2_AUTHORIZATION_ID,
+        "job_id": PINNED_V2_FAILED_JOB_ID,
+        "query_sha256": PINNED_V2_CANDIDATE_QUERY_SHA256,
+        "expected_schema_sha256": PINNED_V2_CANDIDATE_SCHEMA_SHA256,
+        "expected_dry_run_bytes": PINNED_V2_DRY_RUN_BYTES,
+        "maximum_bytes_billed": (
+            CANDIDATE_STATISTICS_V2_MAXIMUM_BYTES_BILLED
+        ),
+        "execution_calls": 1,
+        "automatic_retries": 0,
+        "candidate_materialized": False,
+    }
+    if (
+        not isinstance(payload, dict)
+        or any(
+            payload.get(field) != expected
+            for field, expected in expected_fields.items()
+        )
+    ):
+        raise CandidateStatisticsV2RecoveryEvidenceInvalid()
+    return True
+
+
+def _recovery_receipt_fields(
+    request: CandidateStatisticsV2ExecutionRequest,
+    validated: bool,
+) -> dict[str, object]:
+    if (
+        request.authorization_id
+        != CANDIDATE_STATISTICS_V2_RECOVERY_AUTHORIZATION_ID
+    ):
+        return {}
+    return {
+        "recovery_from_authorization_id": (
+            request.recovery_from_authorization_id
+        ),
+        "expected_previous_receipt_sha256": (
+            request.expected_previous_receipt_sha256
+        ),
+        "expected_previous_job_id": request.expected_previous_job_id,
+        "expected_previous_job_error_reason": (
+            request.expected_previous_job_error_reason
+        ),
+        "expected_previous_job_total_bytes_processed": (
+            request.expected_previous_job_total_bytes_processed
+        ),
+        "expected_previous_job_total_bytes_billed": (
+            request.expected_previous_job_total_bytes_billed
+        ),
+        "recovery_evidence_validated": validated,
+    }
 
 
 def _job_id(request: CandidateStatisticsV2ExecutionRequest) -> str:
@@ -624,6 +860,7 @@ def _outcome(
     network_requests: int = 0,
     execution_calls: int = 0,
     written_paths: tuple[str, ...] = (),
+    recovery_evidence_validated: bool = False,
 ) -> CandidateStatisticsV2ExecutionOutcome:
     return CandidateStatisticsV2ExecutionOutcome(
         status=status,
@@ -663,5 +900,22 @@ def _outcome(
         blocking_reasons=blocking_reasons,
         network_requests=network_requests,
         execution_calls=execution_calls,
+        recovery_from_authorization_id=(
+            request.recovery_from_authorization_id
+        ),
+        expected_previous_receipt_sha256=(
+            request.expected_previous_receipt_sha256
+        ),
+        expected_previous_job_id=request.expected_previous_job_id,
+        expected_previous_job_error_reason=(
+            request.expected_previous_job_error_reason
+        ),
+        expected_previous_job_total_bytes_processed=(
+            request.expected_previous_job_total_bytes_processed
+        ),
+        expected_previous_job_total_bytes_billed=(
+            request.expected_previous_job_total_bytes_billed
+        ),
+        recovery_evidence_validated=recovery_evidence_validated,
         written_paths=written_paths,
     )
