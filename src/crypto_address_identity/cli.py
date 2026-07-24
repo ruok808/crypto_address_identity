@@ -61,6 +61,9 @@ from crypto_address_identity.universe.bigquery import (
     GoogleBigQueryBackend,
 )
 from crypto_address_identity.universe.bitcoin_core import BitcoinCoreProbe
+from crypto_address_identity.universe.candidate_statistics import (
+    BigQueryCandidateStatisticsProbe,
+)
 from crypto_address_identity.universe.features import (
     BigQueryFeatureMaterializer,
     BigQueryMaterializationRequest,
@@ -260,6 +263,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe_probe_address_scale.set_defaults(
         handler=_handle_universe_probe_bigquery_address_scale
+    )
+
+    universe_probe_candidate_statistics = universe_probe_commands.add_parser(
+        "bigquery-candidate-statistics"
+    )
+    candidate_statistics_mode = (
+        universe_probe_candidate_statistics.add_mutually_exclusive_group(
+            required=True
+        )
+    )
+    candidate_statistics_mode.add_argument("--dry-run", action="store_true")
+    candidate_statistics_mode.add_argument(
+        "--execute-readonly",
+        action="store_true",
+    )
+    universe_probe_candidate_statistics.add_argument(
+        "--as-of-date", required=True
+    )
+    universe_probe_candidate_statistics.add_argument(
+        "--cutoff-height", type=int, required=True
+    )
+    universe_probe_candidate_statistics.add_argument(
+        "--expected-query-sha256"
+    )
+    universe_probe_candidate_statistics.add_argument(
+        "--sandbox-budget-bytes",
+        type=int,
+        default=0,
+    )
+    universe_probe_candidate_statistics.add_argument(
+        "--reserve-bytes",
+        type=int,
+        default=250_000_000_000,
+    )
+    universe_probe_candidate_statistics.set_defaults(
+        handler=_handle_universe_probe_bigquery_candidate_statistics
     )
 
     universe_probe_bitcoin = universe_probe_commands.add_parser("bitcoin-core")
@@ -781,6 +820,64 @@ def _handle_universe_probe_bigquery_address_scale(
         **result.model_dump(mode="json"),
         "as_of_date": as_of_date.isoformat(),
         "network_requests": 2,
+        "provider_requests": 0,
+        "provider_points": 0,
+        "written_paths": [],
+    }
+
+
+def _handle_universe_probe_bigquery_candidate_statistics(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    as_of_date = _parse_date(arguments.as_of_date)
+    if arguments.cutoff_height < 0:
+        raise CliError("cutoff height must be non-negative")
+    cutoff_time = datetime.combine(as_of_date, time.max, tzinfo=UTC)
+    plan = BigQueryQueryPlan.load(settings.bigquery_dataset)
+    if arguments.dry_run:
+        return {
+            "status": "dry_run",
+            "source_kind": "bigquery",
+            "query_kind": "btc_candidate_statistics",
+            "read_only": True,
+            "as_of_date": as_of_date.isoformat(),
+            "cutoff_height": arguments.cutoff_height,
+            "cutoff_time": cutoff_time.isoformat().replace("+00:00", "Z"),
+            "query_sha256": plan.candidate_statistics_sha256,
+            "network_requests": 0,
+            "provider_requests": 0,
+            "provider_points": 0,
+            "written_paths": [],
+        }
+    if not arguments.expected_query_sha256:
+        raise CliError("expected candidate query SHA-256 required")
+    if arguments.sandbox_budget_bytes <= 0:
+        raise CliError("positive BigQuery Sandbox budget required")
+    if (
+        arguments.reserve_bytes < 0
+        or arguments.reserve_bytes >= arguments.sandbox_budget_bytes
+    ):
+        raise CliError("BigQuery reserve must be below Sandbox budget")
+
+    result = BigQueryCandidateStatisticsProbe(
+        backend=_make_bigquery_backend(settings),
+        dataset=settings.bigquery_dataset,
+        max_source_age=timedelta(
+            hours=settings.universe_max_source_age_hours
+        ),
+    ).run(
+        cutoff_height=arguments.cutoff_height,
+        cutoff_time=cutoff_time,
+        expected_query_sha256=arguments.expected_query_sha256,
+        sandbox_budget_bytes=arguments.sandbox_budget_bytes,
+        reserve_bytes=arguments.reserve_bytes,
+    )
+    return {
+        **result.model_dump(mode="json"),
+        "as_of_date": as_of_date.isoformat(),
+        "cutoff_height": arguments.cutoff_height,
+        "cutoff_time": cutoff_time.isoformat().replace("+00:00", "Z"),
         "provider_requests": 0,
         "provider_points": 0,
         "written_paths": [],

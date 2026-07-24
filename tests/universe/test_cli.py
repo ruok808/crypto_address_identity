@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from crypto_address_identity.cli import main
-from crypto_address_identity.universe.bigquery import QueryEstimate
+from crypto_address_identity.universe.bigquery import MonthlyQueryUsage, QueryEstimate
 from crypto_address_identity.universe.features import FeatureMaterializationResult
 from crypto_address_identity.universe.models import SourceManifest, SourceProbeResult
 from crypto_address_identity.universe.query_plan import BigQueryQueryPlan
@@ -59,6 +59,18 @@ class FakeBigQueryBackend:
             "finalized_hash": "11" * 32,
             "taproot_address_count": 2,
         }
+
+    def monthly_successful_query_usage(
+        self,
+        *,
+        month_start: datetime,
+        month_end: datetime,
+    ) -> MonthlyQueryUsage:
+        self.calls.append("monthly_successful_query_usage")
+        return MonthlyQueryUsage(
+            successful_query_jobs=2,
+            total_bytes_billed=100,
+        )
 
 
 class FakeBitcoinCoreProbe:
@@ -334,6 +346,130 @@ def test_bigquery_address_scale_live_probe_requires_positive_budget(
             "2026-07-24",
             "--sandbox-budget-bytes",
             "0",
+        ]
+    )
+
+    assert exit_code == 2
+    assert _output(capsys) == {
+        "error_code": "invalid_input",
+        "status": "error",
+    }
+
+
+def test_bigquery_candidate_statistics_offline_preview_is_network_free(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: (_ for _ in ()).throw(AssertionError("network boundary")),
+    )
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-candidate-statistics",
+            "--dry-run",
+            "--as-of-date",
+            "2026-07-24",
+            "--cutoff-height",
+            "959187",
+        ]
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "dry_run"
+    assert output["query_kind"] == "btc_candidate_statistics"
+    assert output["query_sha256"] == BigQueryQueryPlan.load(
+        "bigquery-public-data.crypto_bitcoin"
+    ).candidate_statistics_sha256
+    assert output["network_requests"] == 0
+    assert output["provider_requests"] == 0
+    assert output["provider_points"] == 0
+    assert output["written_paths"] == []
+    assert not (tmp_path / "universe").exists()
+
+
+def test_bigquery_candidate_statistics_live_probe_never_executes_or_writes(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    backend = FakeBigQueryBackend()
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: backend,
+    )
+    query_sha256 = BigQueryQueryPlan.load(
+        "bigquery-public-data.crypto_bitcoin"
+    ).candidate_statistics_sha256
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-candidate-statistics",
+            "--execute-readonly",
+            "--as-of-date",
+            "2026-07-24",
+            "--cutoff-height",
+            "959187",
+            "--expected-query-sha256",
+            query_sha256,
+            "--sandbox-budget-bytes",
+            "2000",
+            "--reserve-bytes",
+            "500",
+        ]
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "within_budget"
+    assert output["dry_run_bytes"] == 900
+    assert output["month_to_date_billed_bytes"] == 100
+    assert output["projected_month_to_date_bytes"] == 1000
+    assert output["projected_reserve_bytes"] == 1000
+    assert output["within_budget"] is True
+    assert output["network_requests"] == 3
+    assert output["provider_requests"] == 0
+    assert output["provider_points"] == 0
+    assert output["written_paths"] == []
+    assert backend.calls == [
+        "table_metadata",
+        "monthly_successful_query_usage",
+        "dry_run",
+    ]
+    assert backend.query_caps == []
+    assert not (tmp_path / "universe").exists()
+
+
+def test_bigquery_candidate_statistics_live_probe_requires_pinned_hash(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-candidate-statistics",
+            "--execute-readonly",
+            "--as-of-date",
+            "2026-07-24",
+            "--cutoff-height",
+            "959187",
+            "--sandbox-budget-bytes",
+            "2000",
+            "--reserve-bytes",
+            "500",
         ]
     )
 

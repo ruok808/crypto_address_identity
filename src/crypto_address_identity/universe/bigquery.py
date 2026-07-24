@@ -71,6 +71,13 @@ class QueryEstimate(UniverseModel):
     cache_hit: bool
 
 
+class MonthlyQueryUsage(UniverseModel):
+    """Successful billed query jobs within one explicit UTC interval."""
+
+    successful_query_jobs: int = Field(ge=0)
+    total_bytes_billed: int = Field(ge=0)
+
+
 class BigQueryBackend(Protocol):
     last_query_total_bytes_processed: int | None
 
@@ -82,6 +89,13 @@ class BigQueryBackend(Protocol):
         parameters: dict[str, object],
         maximum_bytes_billed: int,
     ) -> QueryEstimate: ...
+
+    def monthly_successful_query_usage(
+        self,
+        *,
+        month_start: datetime,
+        month_end: datetime,
+    ) -> MonthlyQueryUsage: ...
 
     def query_one(
         self,
@@ -614,6 +628,52 @@ class GoogleBigQueryBackend:
         return QueryEstimate(
             total_bytes_processed=int(job.total_bytes_processed or 0),
             cache_hit=bool(job.cache_hit),
+        )
+
+    def monthly_successful_query_usage(
+        self,
+        *,
+        month_start: datetime,
+        month_end: datetime,
+    ) -> MonthlyQueryUsage:
+        if (
+            month_start.tzinfo is None
+            or month_start.utcoffset() is None
+            or month_end.tzinfo is None
+            or month_end.utcoffset() is None
+            or month_start >= month_end
+        ):
+            raise BigQueryBoundaryError("BigQuery usage interval is invalid")
+        start = month_start.astimezone(UTC)
+        end = month_end.astimezone(UTC)
+        try:
+            jobs = self._client.list_jobs(
+                all_users=True,
+                min_creation_time=start,
+                max_creation_time=end,
+            )
+            successful_jobs = 0
+            total_bytes_billed = 0
+            for job in jobs:
+                if str(getattr(job, "job_type", "")).upper() != "QUERY":
+                    continue
+                if str(getattr(job, "state", "")).upper() != "DONE":
+                    continue
+                if getattr(job, "error_result", None) is not None:
+                    continue
+                if bool(getattr(job, "dry_run", False)):
+                    continue
+                successful_jobs += 1
+                total_bytes_billed += int(
+                    getattr(job, "total_bytes_billed", 0) or 0
+                )
+        except Exception as exc:
+            raise BigQueryBoundaryError(
+                "BigQuery monthly usage is unavailable"
+            ) from exc
+        return MonthlyQueryUsage(
+            successful_query_jobs=successful_jobs,
+            total_bytes_billed=total_bytes_billed,
         )
 
     def query_one(

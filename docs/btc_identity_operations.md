@@ -52,23 +52,31 @@ Follow this exact operating sequence:
    `--execute-readonly` mode performs table metadata reads plus a free
    BigQuery dry run. It does not execute the aggregate and therefore does not
    return the address count.
-4. **Bitcoin Core read-only probe.** Run only the four allow-listed RPCs:
+4. **Candidate-statistics cost gate.** First run
+   `bigquery-candidate-statistics --dry-run` without constructing a backend and
+   record the fixed query SHA-256. Then, after read-only approval, pass that
+   exact digest to `--execute-readonly`. The live path performs only one table
+   metadata lookup, one current-month Jobs API listing, and one free BigQuery
+   dry run. It fails closed above the fixed 650 billion-byte query limit or
+   when projected month usage would consume the operator-required reserve. It
+   has no chain-query execution path and does not return candidate counts.
+5. **Bitcoin Core read-only probe.** Run only the four allow-listed RPCs:
    `getblockchaininfo`, `getblockhash`, `getblockheader`, and `getindexinfo`.
    Cookie content, authorization data, and raw RPC errors never enter output.
-5. **Cutoff height/hash reconciliation.** Require the finalized BigQuery and
+6. **Cutoff height/hash reconciliation.** Require the finalized BigQuery and
    Bitcoin Core height/hash to agree. A partial or unavailable Core source
    cannot establish a canonical complete-history cutoff.
-6. **Review dry-run bytes.** Compare the reported bytes with the exact job cap,
+7. **Review dry-run bytes.** Compare the reported bytes with the exact job cap,
    remaining account allowance, and local storage budget.
-7. **Separately approved chain read.** Run one `--execute-chain-read` command
+8. **Separately approved chain read.** Run one `--execute-chain-read` command
    with the reviewed query hash, cutoff, and positive
    `--maximum-bytes-billed`. Do not retry a completed job.
-8. **Campaign checksum verification.** Verify the immutable manifest, Parquet
+9. **Campaign checksum verification.** Verify the immutable manifest, Parquet
    schemas, source probes, and every recorded artifact checksum.
-9. **Aggregate-only candidate dry-run.** Run `cai universe candidates` to
+10. **Aggregate-only candidate dry-run.** Run `cai universe candidates` to
    inspect coverage, P0/P1/control counts, overlap, capacity, and projected
    time. It does not output addresses or open the identity SQLite database.
-10. **Stop and report.** Phase 1 stops after aggregate statistics.
+11. **Stop and report.** Phase 1 stops after aggregate statistics.
    It does not approve the 1,000-address canary.
 
 Example offline and bounded commands:
@@ -86,6 +94,15 @@ cai universe probe bigquery-address-scale --execute-readonly \
   --as-of-date YYYY-MM-DD \
   --sandbox-budget-bytes REVIEWED_SANDBOX_BUDGET
 
+cai universe probe bigquery-candidate-statistics --dry-run \
+  --as-of-date YYYY-MM-DD --cutoff-height FINALIZED_HEIGHT
+
+cai universe probe bigquery-candidate-statistics --execute-readonly \
+  --as-of-date YYYY-MM-DD --cutoff-height FINALIZED_HEIGHT \
+  --expected-query-sha256 REVIEWED_QUERY_SHA256 \
+  --sandbox-budget-bytes REVIEWED_SANDBOX_BUDGET \
+  --reserve-bytes REVIEWED_RESERVE_BYTES
+
 cai universe probe bitcoin-core --execute-readonly
 
 cai universe build bigquery --execute-chain-read \
@@ -98,11 +115,18 @@ cai universe candidates --campaign-id CAMPAIGN --dry-run \
 ```
 
 A public BigQuery dataset is not automatically free.
-BigQuery free tier is account-wide, and this CLI can report a job's dry-run
-bytes but cannot know the account's remaining free-tier allowance.
+BigQuery free tier is account-wide. The candidate-statistics
+probe estimates remaining capacity only from successful billed query jobs
+visible to the current identity in the configured billing project for the
+current UTC month. Jobs outside that project or outside the identity's list
+permission are not inferred.
 A `within_budget` address-scale result means only that the estimated bytes are
 below the operator-supplied budget. It is not proof that the account still has
 that allowance available, and it is not approval to execute the query.
+A `within_budget` candidate-statistics result additionally means that the
+projected successful-job total preserves the requested reserve and that the
+fixed SQL compiled in a BigQuery dry run. It is still not the census result and
+does not authorize executing the approximately 638 GB query.
 A pruned Bitcoin Core node cannot prove historical script coverage; it reports
 partial capability and the workflow stops before claiming chain-universe
 completeness.

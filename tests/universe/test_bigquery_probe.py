@@ -10,6 +10,7 @@ from crypto_address_identity.universe.bigquery import (
     BigQueryAddressScaleProbe,
     BigQueryProbe,
     GoogleBigQueryBackend,
+    MonthlyQueryUsage,
     QueryEstimate,
     TableField,
     TableMetadata,
@@ -445,3 +446,74 @@ def test_google_backend_applies_byte_cap_only_to_executing_queries() -> None:
 
     assert dry_run_config.maximum_bytes_billed is None
     assert execute_config.maximum_bytes_billed == 1_000
+
+
+def test_google_backend_sums_only_successful_monthly_query_jobs() -> None:
+    class FakeJob:
+        def __init__(
+            self,
+            *,
+            job_type: str,
+            state: str,
+            total_bytes_billed: int,
+            error_result: object | None = None,
+            dry_run: bool = False,
+        ) -> None:
+            self.job_type = job_type
+            self.state = state
+            self.total_bytes_billed = total_bytes_billed
+            self.error_result = error_result
+            self.dry_run = dry_run
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.arguments: dict[str, object] = {}
+
+        def list_jobs(self, **arguments: object) -> list[FakeJob]:
+            self.arguments = arguments
+            return [
+                FakeJob(
+                    job_type="QUERY", state="DONE", total_bytes_billed=100
+                ),
+                FakeJob(
+                    job_type="query", state="done", total_bytes_billed=200
+                ),
+                FakeJob(
+                    job_type="LOAD", state="DONE", total_bytes_billed=999
+                ),
+                FakeJob(
+                    job_type="QUERY", state="RUNNING", total_bytes_billed=999
+                ),
+                FakeJob(
+                    job_type="QUERY",
+                    state="DONE",
+                    total_bytes_billed=999,
+                    error_result={"reason": "blocked"},
+                ),
+                FakeJob(
+                    job_type="QUERY",
+                    state="DONE",
+                    total_bytes_billed=999,
+                    dry_run=True,
+                ),
+            ]
+
+    backend = object.__new__(GoogleBigQueryBackend)
+    backend._client = FakeClient()
+    month_start = datetime(2026, 7, 1, tzinfo=UTC)
+    month_end = datetime(2026, 8, 1, tzinfo=UTC)
+
+    usage = backend.monthly_successful_query_usage(
+        month_start=month_start,
+        month_end=month_end,
+    )
+
+    assert usage == MonthlyQueryUsage(
+        successful_query_jobs=2,
+        total_bytes_billed=300,
+    )
+    assert backend._client.arguments == {
+        "all_users": True,
+        "min_creation_time": month_start,
+        "max_creation_time": month_end,
+    }
