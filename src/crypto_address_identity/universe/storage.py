@@ -20,6 +20,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import ValidationError
 
+from crypto_address_identity.universe.anchors import (
+    CalibrationAnchorRow,
+    CalibrationAnchorSnapshot,
+)
 from crypto_address_identity.universe.models import (
     AddressFeatureRow,
     CampaignManifest,
@@ -80,6 +84,13 @@ SOURCE_ACCOUNTING_SCHEMA = pa.schema(
         pa.field("unmatched_input_rows", pa.int64(), nullable=False),
     ]
 )
+CALIBRATION_ANCHOR_SCHEMA = pa.schema(
+    [
+        pa.field("address_id", pa.string(), nullable=False),
+        pa.field("normalized_address", pa.string(), nullable=False),
+        pa.field("reason_code", pa.string(), nullable=False),
+    ]
+)
 
 
 class UniverseIntegrityError(RuntimeError):
@@ -132,6 +143,9 @@ class PublishedCampaign:
             ),
             "source_accounting_glob": str(
                 self.root / "source_accounting" / "*.parquet"
+            ),
+            "calibration_anchor_glob": str(
+                self.root / "calibration_anchors" / "*.parquet"
             ),
         }
         try:
@@ -227,10 +241,18 @@ class CampaignWriter:
         self._duplicate_connection.execute(
             "CREATE TABLE script_ids (identifier VARCHAR PRIMARY KEY)"
         )
+        self._duplicate_connection.execute(
+            "CREATE TABLE anchor_keys (identifier VARCHAR PRIMARY KEY)"
+        )
         self._part_numbers: dict[tuple[str, str], int] = defaultdict(int)
         self._address_feature_rows = 0
         self._script_subject_rows = 0
         self._source_accounting_rows = 0
+        self._calibration_anchor_rows = 0
+        self._calibration_anchors_written = False
+        self._calibration_anchor_database_sha256: str | None = None
+        self._calibration_anchor_snapshot_sha256: str | None = None
+        self._calibration_anchor_as_of: datetime | None = None
         self._source_probes = 0
         self._published = False
 
@@ -327,6 +349,70 @@ class CampaignWriter:
         _write_json(path, probe.model_dump(mode="json"))
         self._source_probes += 1
 
+    def write_calibration_anchor_snapshot(
+        self, snapshot: CalibrationAnchorSnapshot
+    ) -> None:
+        if snapshot.as_of > self._source_manifest.cutoff_time:
+            self.abort()
+            raise UniverseIntegrityError(
+                "calibration snapshot exceeds campaign cutoff"
+            )
+        self._write_calibration_anchors(snapshot.rows)
+        self._calibration_anchor_database_sha256 = snapshot.database_sha256
+        self._calibration_anchor_snapshot_sha256 = snapshot.snapshot_sha256
+        self._calibration_anchor_as_of = snapshot.as_of
+        _write_json(
+            self._staging_root / "calibration_anchors" / "metadata.json",
+            {
+                "status": "snapshot",
+                "as_of": snapshot.as_of.isoformat().replace("+00:00", "Z"),
+                "database_sha256": snapshot.database_sha256,
+                "snapshot_sha256": snapshot.snapshot_sha256,
+                "row_count": len(snapshot.rows),
+            },
+        )
+
+    def _write_calibration_anchors(
+        self,
+        rows: Iterable[CalibrationAnchorRow | Mapping[str, object]],
+    ) -> None:
+        if self._calibration_anchors_written:
+            self.abort()
+            raise UniverseIntegrityError("calibration anchors may be written once")
+        try:
+            validated = [
+                row
+                if isinstance(row, CalibrationAnchorRow)
+                else CalibrationAnchorRow.model_validate(row)
+                for row in rows
+            ]
+            self._reject_duplicate_ids(
+                (
+                    f"{row.address_id}:{row.reason_code}"
+                    for row in validated
+                ),
+                table="anchor_keys",
+                label="calibration anchor",
+            )
+            self._write_table(
+                self._staging_root
+                / "calibration_anchors"
+                / "anchors.parquet",
+                [row.model_dump(mode="python") for row in validated],
+                CALIBRATION_ANCHOR_SCHEMA,
+            )
+            self._calibration_anchor_rows = len(validated)
+            self._calibration_anchors_written = True
+        except (
+            UniverseIntegrityError,
+            ValidationError,
+            ValueError,
+            OSError,
+            pa.ArrowException,
+        ) as exc:
+            self.abort()
+            raise UniverseIntegrityError("calibration anchor write failed") from exc
+
     def publish(self) -> PublishedCampaign:
         if self._published:
             raise UniverseIntegrityError("campaign writer is already published")
@@ -338,6 +424,17 @@ class CampaignWriter:
             self.abort()
             raise UniverseIntegrityError("campaign is incomplete")
         try:
+            if not self._calibration_anchors_written:
+                self._write_calibration_anchors(())
+                _write_json(
+                    self._staging_root
+                    / "calibration_anchors"
+                    / "metadata.json",
+                    {
+                        "status": "not_provided",
+                        "row_count": 0,
+                    },
+                )
             self._close_duplicate_tracker()
             artifact_hashes = {
                 str(path.relative_to(self._staging_root)): _sha256_file(path)
@@ -349,7 +446,10 @@ class CampaignWriter:
                 created_at=self._source_manifest.cutoff_time,
                 address_feature_rows=self._address_feature_rows,
                 script_subject_rows=self._script_subject_rows,
-                calibration_anchor_rows=0,
+                calibration_anchor_rows=self._calibration_anchor_rows,
+                calibration_anchor_database_sha256=self._calibration_anchor_database_sha256,
+                calibration_anchor_snapshot_sha256=self._calibration_anchor_snapshot_sha256,
+                calibration_anchor_as_of=self._calibration_anchor_as_of,
                 source_accounting_rows=self._source_accounting_rows,
                 artifact_sha256=artifact_hashes,
             )
@@ -422,11 +522,13 @@ class CampaignWriter:
     def _reject_duplicate_ids(
         self, values: Iterable[str], *, table: str, label: str
     ) -> None:
-        if table not in {"address_ids", "script_ids"}:
+        if table not in {"address_ids", "script_ids", "anchor_keys"}:
             raise UniverseIntegrityError("invalid duplicate tracker table")
         if self._duplicate_connection is None:
             raise UniverseIntegrityError("duplicate tracker is closed")
         identifiers = [(value,) for value in values]
+        if not identifiers:
+            return
         try:
             self._duplicate_connection.execute("BEGIN TRANSACTION")
             self._duplicate_connection.executemany(
@@ -571,6 +673,10 @@ def _verify_root(root: Path, campaign_id: str) -> UniverseVerification:
         _verify_parquet_schema(
             root / "source_accounting", SOURCE_ACCOUNTING_SCHEMA
         )
+        _verify_parquet_schema(
+            root / "calibration_anchors", CALIBRATION_ANCHOR_SCHEMA
+        )
+        _verify_anchor_metadata(root / "calibration_anchors", manifest)
     except (UniverseIntegrityError, pa.ArrowException, OSError):
         errors.append("manifest_or_schema_invalid")
     return UniverseVerification(
@@ -588,6 +694,43 @@ def _verify_parquet_schema(root: Path, expected: pa.Schema) -> None:
     for path in paths:
         if not pq.read_schema(path).equals(expected):
             raise UniverseIntegrityError("parquet schema mismatch")
+
+
+def _verify_anchor_metadata(root: Path, manifest: CampaignManifest) -> None:
+    try:
+        metadata = json.loads((root / "metadata.json").read_text(encoding="ascii"))
+    except (OSError, ValueError) as exc:
+        raise UniverseIntegrityError("anchor metadata is invalid") from exc
+    if not isinstance(metadata, dict):
+        raise UniverseIntegrityError("anchor metadata is invalid")
+    if metadata.get("row_count") != manifest.calibration_anchor_rows:
+        raise UniverseIntegrityError("anchor row count mismatch")
+    if metadata.get("status") == "not_provided":
+        if any(
+            value is not None
+            for value in (
+                manifest.calibration_anchor_database_sha256,
+                manifest.calibration_anchor_snapshot_sha256,
+                manifest.calibration_anchor_as_of,
+            )
+        ):
+            raise UniverseIntegrityError("unexpected anchor provenance")
+        return
+    if metadata.get("status") != "snapshot":
+        raise UniverseIntegrityError("anchor metadata status is invalid")
+    if (
+        metadata.get("database_sha256")
+        != manifest.calibration_anchor_database_sha256
+        or metadata.get("snapshot_sha256")
+        != manifest.calibration_anchor_snapshot_sha256
+        or metadata.get("as_of")
+        != (
+            manifest.calibration_anchor_as_of.isoformat().replace("+00:00", "Z")
+            if manifest.calibration_anchor_as_of
+            else None
+        )
+    ):
+        raise UniverseIntegrityError("anchor provenance mismatch")
 
 
 def _sha256_file(path: Path) -> str:

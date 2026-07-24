@@ -8,6 +8,11 @@ import pyarrow as pa
 import pytest
 from pydantic import ValidationError
 
+from crypto_address_identity.chains.bitcoin import normalize_bitcoin_address
+from crypto_address_identity.universe.anchors import (
+    CalibrationAnchorRow,
+    CalibrationAnchorSnapshot,
+)
 from crypto_address_identity.universe.bigquery import QueryEstimate
 from crypto_address_identity.universe.features import (
     BigQueryFeatureMaterializer,
@@ -341,3 +346,38 @@ def test_materializer_does_not_create_identity_or_provider_runtime_paths(
     assert not (tmp_path / "identity.sqlite3").exists()
     assert not (tmp_path / "raw").exists()
     assert not (tmp_path / "exports").exists()
+
+
+def test_materializer_publishes_supplied_checksum_pinned_anchors(
+    tmp_path: Path,
+) -> None:
+    subject = normalize_bitcoin_address(BTC_ADDRESSES[0])
+    snapshot = CalibrationAnchorSnapshot(
+        as_of=datetime(2026, 7, 24, tzinfo=UTC),
+        database_sha256="09" * 32,
+        rows=(
+            CalibrationAnchorRow(
+                address_id=subject.address_id,
+                normalized_address=subject.normalized_address,
+                reason_code="official_or_signed_evidence",
+            ),
+        ),
+    )
+    backend = FakeBigQueryBackend(
+        dry_run_bytes=900,
+        result_batches=feature_batches(),
+        total_bytes_processed=900,
+    )
+    store = UniverseStore(tmp_path / "universe")
+
+    result = BigQueryFeatureMaterializer(backend=backend, store=store).run(
+        request=materialization_request(),
+        calibration_snapshot=snapshot,
+    )
+    published = store.load(result.campaign_id)
+
+    assert published.campaign_manifest.calibration_anchor_rows == 1
+    assert (
+        published.campaign_manifest.calibration_anchor_snapshot_sha256
+        == snapshot.snapshot_sha256
+    )

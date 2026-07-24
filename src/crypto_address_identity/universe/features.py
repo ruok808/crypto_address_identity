@@ -9,6 +9,7 @@ from typing import Literal
 import pyarrow as pa
 from pydantic import Field, field_validator, model_validator
 
+from crypto_address_identity.universe.anchors import CalibrationAnchorSnapshot
 from crypto_address_identity.universe.bigquery import (
     BigQueryBackend,
     BigQueryBoundaryError,
@@ -81,7 +82,10 @@ class BigQueryFeatureMaterializer:
         self._store = store
 
     def run(
-        self, *, request: BigQueryMaterializationRequest
+        self,
+        *,
+        request: BigQueryMaterializationRequest,
+        calibration_snapshot: CalibrationAnchorSnapshot | None = None,
     ) -> FeatureMaterializationResult:
         plan = BigQueryQueryPlan.load(request.dataset)
         parameters = {
@@ -150,6 +154,8 @@ class BigQueryFeatureMaterializer:
                 raise FeatureMaterializationError(
                     "BigQuery execution bytes violate the approved cap"
                 )
+            if calibration_snapshot is not None:
+                writer.write_calibration_anchor_snapshot(calibration_snapshot)
             published = writer.publish()
         except Exception as exc:
             writer.abort()

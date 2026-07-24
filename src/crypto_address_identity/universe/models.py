@@ -287,6 +287,9 @@ class CampaignManifest(UniverseModel):
     address_feature_rows: int = Field(default=0, ge=0)
     script_subject_rows: int = Field(default=0, ge=0)
     calibration_anchor_rows: int = Field(default=0, ge=0)
+    calibration_anchor_database_sha256: str | None = None
+    calibration_anchor_snapshot_sha256: str | None = None
+    calibration_anchor_as_of: datetime | None = None
     source_accounting_rows: int = Field(default=0, ge=0)
     artifact_sha256: dict[str, str] = Field(default_factory=dict)
 
@@ -302,6 +305,29 @@ class CampaignManifest(UniverseModel):
     def validate_created_at(cls, value: datetime) -> datetime:
         return _as_utc(value, field_name="created_at")
 
+    @field_validator(
+        "calibration_anchor_database_sha256",
+        "calibration_anchor_snapshot_sha256",
+    )
+    @classmethod
+    def validate_optional_anchor_hash(
+        cls, value: str | None, info: object
+    ) -> str | None:
+        if value is None:
+            return None
+        return _require_sha256(
+            value, field_name=getattr(info, "field_name", "anchor_sha256")
+        )
+
+    @field_validator("calibration_anchor_as_of")
+    @classmethod
+    def validate_anchor_as_of(cls, value: datetime | None) -> datetime | None:
+        return (
+            None
+            if value is None
+            else _as_utc(value, field_name="calibration_anchor_as_of")
+        )
+
     @field_validator("artifact_sha256")
     @classmethod
     def validate_artifact_hashes(cls, value: dict[str, str]) -> dict[str, str]:
@@ -314,6 +340,15 @@ class CampaignManifest(UniverseModel):
     def validate_source_campaign(self) -> "CampaignManifest":
         if self.source_manifest.campaign_id != self.campaign_id:
             raise ValueError("source manifest campaign_id mismatch")
+        anchor_metadata = (
+            self.calibration_anchor_database_sha256,
+            self.calibration_anchor_snapshot_sha256,
+            self.calibration_anchor_as_of,
+        )
+        if any(value is None for value in anchor_metadata) and any(
+            value is not None for value in anchor_metadata
+        ):
+            raise ValueError("calibration anchor provenance must be all-or-none")
         return self
 
     @computed_field
