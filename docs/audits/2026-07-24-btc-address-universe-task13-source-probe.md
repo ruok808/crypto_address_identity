@@ -123,3 +123,37 @@ so a separately approved one-time aggregate execution is technically
 budget-feasible. It is not authorized by this audit. Before any execution, the
 operator must still verify the account's current month-to-date BigQuery usage
 and reserve enough free allowance for other workloads.
+
+## Approved One-Time Aggregate Execution
+
+After a separate explicit approval, the checksum-pinned aggregate was
+submitted once with a deterministic idempotency key and a
+`200,000,000,000`-byte hard billing cap.
+
+- Execution state: `DONE`
+- Error count: `0`
+- Created: `2026-07-24T11:50:02.558000Z`
+- Ended: `2026-07-24T11:50:15.072000Z`
+- Cache hit: `false`
+- Exact unique standard addresses: `1,557,951,354`
+- Query SHA-256:
+  `3fd8371afe3fc971aa0d1995e8f2957a2aaaa48fed92847b31a9b628b31a146b`
+- Total bytes processed: `195,483,438,068`
+- Total bytes billed: `195,483,926,528`
+- Destination table created: `false`
+- Local written paths: `[]`
+- Provider requests and points: `0`
+
+Post-execution month-to-date Jobs API accounting:
+
+- Successful billed query jobs: `2`
+- Total bytes billed: `197,245,534,208`
+- Sandbox comparison limit: `1,099,511,627,776` bytes
+- Remaining comparison allowance: `902,266,093,568` bytes
+- Usage: approximately `17.94%`
+
+The address count is not the count of active wallets, owners, entities, or
+currently funded addresses. It is the exact number of distinct decoded
+single-address outputs in the accepted public transaction-table contract
+through the fixed UTC cutoff. Empty, multi-address, and undecodable scripts
+remain outside this aggregate.
