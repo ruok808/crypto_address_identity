@@ -314,9 +314,15 @@ def test_incomplete_prediction_retries_before_new_discovery_entities(
     )
     now = datetime(2026, 7, 24, tzinfo=UTC)
     first = service.run(dry_run=False, entity_limit=2, now=now)
+    during_cooldown = service.run(
+        dry_run=False, entity_limit=1, now=now + timedelta(minutes=30)
+    )
+    assert during_cooldown.entity_detail_requests == 1
+    assert detail_requests.count("retry") == 1
     second = service.run(dry_run=False, entity_limit=1, now=now + timedelta(hours=1))
 
     assert first.status == "partial"
+    assert detail_requests.count("retry") == 2
     assert second.entity_detail_requests == 1
     assert second.prediction_requests == 1
     assert detail_requests[-1] == "retry"

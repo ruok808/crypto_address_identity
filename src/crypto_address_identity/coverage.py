@@ -317,6 +317,13 @@ class CoverageSyncService:
                 response_bytes += predictions.response_bytes
                 paths.extend(predictions.written_paths)
                 outcomes[predictions.outcome] += 1
+                if predictions.observation_id:
+                    self._record_prediction_attempt(
+                        observation_id=predictions.observation_id,
+                        entity_id=entity_id,
+                        outcome=predictions.outcome,
+                        observed_at=observed_at,
+                    )
                 if predictions.outcome == "success" and predictions.payload and predictions.observation_id:
                     try:
                         addresses = parse_prediction_addresses(predictions.payload)
@@ -468,11 +475,26 @@ class CoverageSyncService:
                     (freshness_cutoff,),
                 ).fetchall()
             }
+            retry_cutoff = _utc_string(
+                now - timedelta(minutes=self.settings.coverage_prediction_retry_backoff_minutes)
+            )
+            cooling_down_entities = {
+                row["provider_entity_id"]
+                for row in connection.execute(
+                    """
+                    SELECT provider_entity_id FROM coverage_entity_prediction_attempt
+                    WHERE outcome IN ('http_error', 'transport_error', 'rate_limited')
+                      AND attempted_at > ?
+                    """,
+                    (retry_cutoff,),
+                ).fetchall()
+            }
             fresh_entities = fresh_detail_entities & fresh_prediction_entities
             for entity_id in fresh_detail_entities - fresh_prediction_entities:
-                priority[entity_id] = 75
+                if entity_id not in cooling_down_entities:
+                    priority[entity_id] = 75
             for entity_id in extra_entity_ids:
-                if entity_id not in fresh_entities:
+                if entity_id not in fresh_entities and entity_id not in cooling_down_entities:
                     priority[entity_id] = max(priority.get(entity_id, 0), 50)
             for row in connection.execute(
                 """
@@ -480,7 +502,10 @@ class CoverageSyncService:
                 FROM coverage_entity_seed GROUP BY provider_entity_id
                 """
             ).fetchall():
-                if row["provider_entity_id"] not in fresh_entities:
+                if (
+                    row["provider_entity_id"] not in fresh_entities
+                    and row["provider_entity_id"] not in cooling_down_entities
+                ):
                     priority[row["provider_entity_id"]] = max(
                         priority.get(row["provider_entity_id"], 0), row["priority"]
                     )
@@ -491,7 +516,10 @@ class CoverageSyncService:
                 GROUP BY provider_entity_id
                 """
             ).fetchall():
-                if row["provider_entity_id"] not in fresh_entities:
+                if (
+                    row["provider_entity_id"] not in fresh_entities
+                    and row["provider_entity_id"] not in cooling_down_entities
+                ):
                     priority.setdefault(row["provider_entity_id"], 75)
         return tuple(entity for entity, _ in sorted(priority.items(), key=lambda item: (-item[1], item[0]))[:limit])
 
@@ -595,6 +623,40 @@ class CoverageSyncService:
                     observation_id,
                     entity_id,
                     parse_outcome,
+                    timestamp,
+                ),
+            )
+
+    def _record_prediction_attempt(
+        self,
+        *,
+        observation_id: str,
+        entity_id: str,
+        outcome: str,
+        observed_at: datetime,
+    ) -> None:
+        timestamp = _utc_string(observed_at)
+        fingerprint = _sha256(
+            {
+                "observation_id": observation_id,
+                "provider_entity_id": entity_id,
+                "outcome": outcome,
+            }
+        )
+        with self.database.write_transaction() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO coverage_entity_prediction_attempt (
+                    prediction_attempt_id, prediction_attempt_fingerprint,
+                    observation_id, provider_entity_id, outcome, attempted_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    fingerprint,
+                    observation_id,
+                    entity_id,
+                    outcome,
                     timestamp,
                 ),
             )

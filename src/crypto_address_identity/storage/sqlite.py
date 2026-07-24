@@ -484,6 +484,36 @@ BEGIN
 END;
 """
 
+_MIGRATION_008_SQL = """
+CREATE TABLE coverage_entity_prediction_attempt (
+    prediction_attempt_id TEXT PRIMARY KEY,
+    prediction_attempt_fingerprint TEXT NOT NULL UNIQUE,
+    observation_id TEXT NOT NULL REFERENCES source_observation(observation_id),
+    provider_entity_id TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (
+        outcome IN ('success', 'http_error', 'transport_error', 'rate_limited')
+    ),
+    attempted_at TEXT NOT NULL
+);
+
+CREATE INDEX coverage_entity_prediction_attempt_lookup
+ON coverage_entity_prediction_attempt(
+    provider_entity_id, outcome, attempted_at DESC
+);
+
+CREATE TRIGGER coverage_entity_prediction_attempt_no_update
+BEFORE UPDATE ON coverage_entity_prediction_attempt
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_prediction_attempt is immutable');
+END;
+
+CREATE TRIGGER coverage_entity_prediction_attempt_no_delete
+BEFORE DELETE ON coverage_entity_prediction_attempt
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_prediction_attempt is immutable');
+END;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration("001_initial_ledger", _MIGRATION_001_SQL),
     Migration("002_claim_review", _MIGRATION_002_SQL),
@@ -492,6 +522,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration("005_coverage_sync", _MIGRATION_005_SQL),
     Migration("006_coverage_address_parse_result", _MIGRATION_006_SQL),
     Migration("007_coverage_entity_prediction_parse_result", _MIGRATION_007_SQL),
+    Migration("008_coverage_entity_prediction_attempt", _MIGRATION_008_SQL),
 )
 
 

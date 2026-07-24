@@ -98,8 +98,9 @@ prediction response containing no Bitcoin addresses is a terminal BTC-negative
 coverage result for that entity until its TTL expires, while a transport or HTTP
 failure remains due for retry even when the entity detail is fresh.
 Such incomplete prediction fetches are scheduled ahead of newly discovered
-entities in the next bounded run, so a transient provider error cannot be
-starved by continual ranking churn.
+entities after a configurable retry cooldown (60 minutes by default), so a
+transient provider error cannot be starved by ranking churn or repeatedly spend
+the same run's request budget.
 It never turns a failed, rate-limited, or malformed response into negative
 evidence. A `403` must be resolved with the gateway before execute mode.
 

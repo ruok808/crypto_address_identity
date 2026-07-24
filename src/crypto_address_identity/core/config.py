@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     coverage_entity_ttl_hours: int = Field(
         default=720, ge=1, validation_alias="CAI_CHAINDATA_COVERAGE_ENTITY_TTL_HOURS"
     )
+    coverage_prediction_retry_backoff_minutes: int = Field(
+        default=60,
+        ge=1,
+        validation_alias="CAI_CHAINDATA_COVERAGE_PREDICTION_RETRY_BACKOFF_MINUTES",
+    )
     coverage_max_entities_per_run: int = Field(
         default=8, ge=1, validation_alias="CAI_CHAINDATA_COVERAGE_MAX_ENTITIES_PER_RUN"
     )
@@ -116,6 +121,7 @@ class Settings(BaseSettings):
             "coverage_response_bytes_budget": self.coverage_response_bytes_budget,
             "coverage_address_ttl_hours": self.coverage_address_ttl_hours,
             "coverage_entity_ttl_hours": self.coverage_entity_ttl_hours,
+            "coverage_prediction_retry_backoff_minutes": self.coverage_prediction_retry_backoff_minutes,
             "coverage_max_entities_per_run": self.coverage_max_entities_per_run,
             "coverage_max_addresses_per_run": self.coverage_max_addresses_per_run,
         }
