@@ -150,7 +150,7 @@ class BigQueryProbe:
         self,
         *,
         as_of_date: date,
-        cutoff_height: int,
+        cutoff_height: int | None,
         cutoff_time: datetime,
         maximum_bytes_billed: int,
         execute_checkpoint: bool,
@@ -168,7 +168,11 @@ class BigQueryProbe:
             return self._blocked(*reasons, schema_sha256=schema_sha256)
 
         parameters = {
-            "cutoff_height": cutoff_height,
+            "cutoff_height": (
+                cutoff_height
+                if cutoff_height is not None
+                else 9_223_372_036_854_775_807
+            ),
             "cutoff_time": cutoff_time,
             "window_30d_start": cutoff_time - timedelta(days=30),
             "window_90d_start": cutoff_time - timedelta(days=90),
@@ -235,7 +239,7 @@ class BigQueryProbe:
                 schema_sha256=schema_sha256,
                 dry_run_bytes=estimate.total_bytes_processed,
             )
-        if finalized_height != cutoff_height:
+        if cutoff_height is not None and finalized_height != cutoff_height:
             return self._blocked(
                 "bigquery_cutoff_mismatch",
                 schema_sha256=schema_sha256,

@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,14 +51,48 @@ from crypto_address_identity.providers.zero_x_router import ProviderProfile
 from crypto_address_identity.resolver import ResolverService
 from crypto_address_identity.storage.raw_payloads import RawPayloadStore
 from crypto_address_identity.storage.sqlite import IdentityDatabase
+from crypto_address_identity.universe.anchors import CalibrationAnchorReader
+from crypto_address_identity.universe.bigquery import (
+    BigQueryBoundaryError,
+    BigQueryCredentialsUnavailable,
+    BigQueryDependencyMissing,
+    BigQueryProbe,
+    GoogleBigQueryBackend,
+)
+from crypto_address_identity.universe.bitcoin_core import BitcoinCoreProbe
+from crypto_address_identity.universe.features import (
+    BigQueryFeatureMaterializer,
+    BigQueryMaterializationRequest,
+    FeatureMaterializationError,
+)
+from crypto_address_identity.universe.models import SourceManifest
+from crypto_address_identity.universe.query_plan import BigQueryQueryPlan
+from crypto_address_identity.universe.statistics import CandidateStatisticsService
+from crypto_address_identity.universe.storage import UniverseIntegrityError, UniverseStore
 
 
 class CliError(ValueError):
     """Safe user-facing CLI error with no raw exception payload."""
 
+    def __init__(
+        self,
+        message: str = "invalid CLI input",
+        *,
+        error_code: str = "invalid_input",
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    """Convert parser failures into the existing structured JSON boundary."""
+
+    def error(self, message: str) -> None:
+        raise CliError("argument parsing failed")
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cai")
+    parser = SafeArgumentParser(prog="cai")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -181,6 +215,87 @@ def build_parser() -> argparse.ArgumentParser:
     replay_bilateral.add_argument("--input", type=Path, action="append", required=True)
     replay_bilateral.add_argument("--snapshot", type=Path, required=True)
     replay_bilateral.set_defaults(handler=_handle_replay_btc_whale_bilateral)
+
+    universe = commands.add_parser("universe")
+    universe_commands = universe.add_subparsers(
+        dest="universe_command",
+        required=True,
+    )
+    universe_probe = universe_commands.add_parser("probe")
+    universe_probe_commands = universe_probe.add_subparsers(
+        dest="universe_probe_command",
+        required=True,
+    )
+    universe_probe_bigquery = universe_probe_commands.add_parser("bigquery")
+    bigquery_probe_mode = universe_probe_bigquery.add_mutually_exclusive_group(
+        required=True
+    )
+    bigquery_probe_mode.add_argument("--dry-run", action="store_true")
+    bigquery_probe_mode.add_argument("--execute-readonly", action="store_true")
+    universe_probe_bigquery.add_argument("--as-of-date", required=True)
+    universe_probe_bigquery.add_argument(
+        "--maximum-bytes-billed",
+        type=int,
+        default=0,
+    )
+    universe_probe_bigquery.set_defaults(handler=_handle_universe_probe_bigquery)
+
+    universe_probe_bitcoin = universe_probe_commands.add_parser("bitcoin-core")
+    bitcoin_probe_mode = universe_probe_bitcoin.add_mutually_exclusive_group(
+        required=True
+    )
+    bitcoin_probe_mode.add_argument("--dry-run", action="store_true")
+    bitcoin_probe_mode.add_argument("--execute-readonly", action="store_true")
+    universe_probe_bitcoin.set_defaults(handler=_handle_universe_probe_bitcoin)
+
+    universe_build = universe_commands.add_parser("build")
+    universe_build_commands = universe_build.add_subparsers(
+        dest="universe_build_command",
+        required=True,
+    )
+    universe_build_bigquery = universe_build_commands.add_parser("bigquery")
+    bigquery_build_mode = universe_build_bigquery.add_mutually_exclusive_group(
+        required=True
+    )
+    bigquery_build_mode.add_argument("--dry-run", action="store_true")
+    bigquery_build_mode.add_argument("--execute-chain-read", action="store_true")
+    universe_build_bigquery.add_argument("--campaign-id", required=True)
+    universe_build_bigquery.add_argument(
+        "--cutoff-height",
+        type=int,
+        required=True,
+    )
+    universe_build_bigquery.add_argument("--cutoff-time", required=True)
+    universe_build_bigquery.add_argument(
+        "--maximum-bytes-billed",
+        type=int,
+        default=0,
+    )
+    universe_build_bigquery.set_defaults(handler=_handle_universe_build_bigquery)
+
+    universe_candidates = universe_commands.add_parser("candidates")
+    universe_candidates.add_argument("--campaign-id", required=True)
+    universe_candidates.add_argument("--dry-run", action="store_true", required=True)
+    universe_candidates.add_argument(
+        "--runtime-minutes",
+        type=int,
+        default=480,
+    )
+    universe_candidates.add_argument(
+        "--requests-per-minute",
+        type=int,
+        default=25,
+    )
+    universe_candidates.add_argument(
+        "--estimated-points-per-address",
+        type=int,
+    )
+    universe_candidates.add_argument(
+        "--discovery-point-budget",
+        type=int,
+        default=0,
+    )
+    universe_candidates.set_defaults(handler=_handle_universe_candidates)
     return parser
 
 
@@ -194,7 +309,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ProviderTokenMissing:
         _emit({"status": "error", "error_code": "provider_token_missing"})
         return 2
-    except (CliError, ValidationError, ValueError):
+    except CliError as exc:
+        _emit({"status": "error", "error_code": exc.error_code})
+        return 2
+    except BigQueryDependencyMissing:
+        _emit({"status": "error", "error_code": "bigquery_dependency_missing"})
+        return 2
+    except BigQueryCredentialsUnavailable:
+        _emit({"status": "error", "error_code": "bigquery_credentials_unavailable"})
+        return 2
+    except BigQueryBoundaryError:
+        _emit({"status": "error", "error_code": "bigquery_schema_blocked"})
+        return 2
+    except FeatureMaterializationError:
+        _emit({"status": "error", "error_code": "universe_integrity_error"})
+        return 2
+    except UniverseIntegrityError:
+        _emit({"status": "error", "error_code": "universe_integrity_error"})
+        return 2
+    except (ValidationError, ValueError):
         _emit({"status": "error", "error_code": "invalid_input"})
         return 2
     except Exception:
@@ -548,6 +681,236 @@ def _handle_replay_btc_whale_bilateral(arguments: argparse.Namespace) -> dict[st
     }
 
 
+def _handle_universe_probe_bigquery(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    as_of_date = _parse_date(arguments.as_of_date)
+    plan = BigQueryQueryPlan.load(settings.bigquery_dataset)
+    if arguments.dry_run:
+        return {
+            "status": "dry_run",
+            "source_kind": "bigquery",
+            "as_of_date": as_of_date.isoformat(),
+            "query_sha256": plan.address_features_sha256,
+            "checkpoint_query_sha256": plan.source_checkpoint_sha256,
+            "network_requests": 0,
+            "provider_requests": 0,
+            "provider_points": 0,
+            "written_paths": [],
+        }
+    if arguments.maximum_bytes_billed <= 0:
+        raise CliError("positive BigQuery byte cap required")
+
+    cutoff_time = datetime.combine(as_of_date, time.max, tzinfo=UTC)
+    result = BigQueryProbe(
+        backend=_make_bigquery_backend(settings),
+        dataset=settings.bigquery_dataset,
+        max_source_age=timedelta(hours=settings.universe_max_source_age_hours),
+    ).run(
+        as_of_date=as_of_date,
+        cutoff_height=None,
+        cutoff_time=cutoff_time,
+        maximum_bytes_billed=arguments.maximum_bytes_billed,
+        execute_checkpoint=True,
+        checkpoint_maximum_bytes_billed=arguments.maximum_bytes_billed,
+    )
+    return {
+        **result.model_dump(mode="json"),
+        "query_sha256": plan.address_features_sha256,
+        "checkpoint_query_sha256": plan.source_checkpoint_sha256,
+        "provider_requests": 0,
+        "provider_points": 0,
+        "written_paths": [],
+    }
+
+
+def _handle_universe_probe_bitcoin(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    if arguments.dry_run:
+        return {
+            "status": "dry_run",
+            "source_kind": "bitcoin_core",
+            "network_requests": 0,
+            "provider_requests": 0,
+            "provider_points": 0,
+            "written_paths": [],
+        }
+    result = _make_bitcoin_core_probe(Settings()).run()
+    return {
+        **result.model_dump(mode="json"),
+        "provider_requests": 0,
+        "provider_points": 0,
+        "written_paths": [],
+    }
+
+
+def _handle_universe_build_bigquery(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    cutoff_time = _parse_utc_datetime(arguments.cutoff_time).astimezone(UTC)
+    if arguments.cutoff_height < 0:
+        raise CliError("cutoff height must be non-negative")
+    plan = BigQueryQueryPlan.load(settings.bigquery_dataset)
+    if arguments.dry_run:
+        _validate_campaign_arguments(
+            campaign_id=arguments.campaign_id,
+            cutoff_height=arguments.cutoff_height,
+            cutoff_time=cutoff_time,
+            query_sha256=plan.address_features_sha256,
+        )
+        return {
+            "status": "dry_run",
+            "campaign_id": arguments.campaign_id,
+            "cutoff_height": arguments.cutoff_height,
+            "cutoff_time": cutoff_time.isoformat().replace("+00:00", "Z"),
+            "query_sha256": plan.address_features_sha256,
+            "dry_run_bytes": None,
+            "network_requests": 0,
+            "provider_requests": 0,
+            "provider_points": 0,
+            "written_paths": [],
+        }
+    if arguments.maximum_bytes_billed <= 0:
+        raise CliError("positive BigQuery byte cap required")
+
+    backend = _make_bigquery_backend(settings)
+    probe = BigQueryProbe(
+        backend=backend,
+        dataset=settings.bigquery_dataset,
+        max_source_age=timedelta(hours=settings.universe_max_source_age_hours),
+    ).run(
+        as_of_date=cutoff_time.date(),
+        cutoff_height=arguments.cutoff_height,
+        cutoff_time=cutoff_time,
+        maximum_bytes_billed=arguments.maximum_bytes_billed,
+        execute_checkpoint=True,
+        checkpoint_maximum_bytes_billed=arguments.maximum_bytes_billed,
+    )
+    if probe.status != "accepted":
+        return {
+            **probe.model_dump(mode="json"),
+            "campaign_id": arguments.campaign_id,
+            "query_sha256": plan.address_features_sha256,
+            "provider_requests": 0,
+            "provider_points": 0,
+            "written_paths": [],
+        }
+    if (
+        probe.schema_sha256 is None
+        or probe.finalized_hash is None
+        or probe.finalized_height != arguments.cutoff_height
+    ):
+        raise CliError(
+            "BigQuery checkpoint is incomplete",
+            error_code="bigquery_schema_blocked",
+        )
+    source_manifest = SourceManifest(
+        campaign_id=arguments.campaign_id,
+        source_kind="bigquery",
+        source_revision=(
+            f"{settings.bigquery_dataset}@{arguments.cutoff_height}:"
+            f"{probe.finalized_hash}"
+        ),
+        cutoff_height=arguments.cutoff_height,
+        cutoff_hash=probe.finalized_hash,
+        cutoff_time=cutoff_time,
+        schema_sha256=probe.schema_sha256,
+        query_sha256=plan.address_features_sha256,
+        source_capabilities=probe.capabilities,
+        script_completeness=probe.script_completeness,
+    )
+    calibration_snapshot = (
+        CalibrationAnchorReader(settings.database_path).read(as_of=cutoff_time)
+        if settings.database_path.is_file()
+        else None
+    )
+    result = _make_bigquery_materializer(settings, backend).run(
+        request=BigQueryMaterializationRequest(
+            source_manifest=source_manifest,
+            dataset=settings.bigquery_dataset,
+            maximum_bytes_billed=arguments.maximum_bytes_billed,
+        ),
+        calibration_snapshot=calibration_snapshot,
+    )
+    return result.model_dump(mode="json")
+
+
+def _handle_universe_candidates(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    store = UniverseStore(settings.universe_root)
+    try:
+        campaign = store.load(arguments.campaign_id)
+    except UniverseIntegrityError as exc:
+        raise CliError(
+            "campaign not found",
+            error_code="campaign_not_found",
+        ) from exc
+    try:
+        result = CandidateStatisticsService(campaign).dry_run(
+            runtime_minutes=arguments.runtime_minutes,
+            requests_per_minute=arguments.requests_per_minute,
+            estimated_points_per_address=arguments.estimated_points_per_address,
+            discovery_point_budget=arguments.discovery_point_budget,
+        )
+    except UniverseIntegrityError as exc:
+        raise CliError(
+            "candidate statistics blocked",
+            error_code="candidate_stats_blocked",
+        ) from exc
+    return result.model_dump(mode="json")
+
+
+def _make_bigquery_backend(settings: Settings) -> GoogleBigQueryBackend:
+    if not settings.bigquery_billing_project:
+        raise BigQueryCredentialsUnavailable(
+            "BigQuery billing project is unavailable"
+        )
+    return GoogleBigQueryBackend(
+        billing_project=settings.bigquery_billing_project,
+        location=settings.bigquery_location,
+    )
+
+
+def _make_bitcoin_core_probe(settings: Settings) -> BitcoinCoreProbe:
+    return BitcoinCoreProbe(settings)
+
+
+def _make_bigquery_materializer(
+    settings: Settings,
+    backend: Any,
+) -> BigQueryFeatureMaterializer:
+    return BigQueryFeatureMaterializer(
+        backend=backend,
+        store=UniverseStore(settings.universe_root),
+    )
+
+
+def _validate_campaign_arguments(
+    *,
+    campaign_id: str,
+    cutoff_height: int,
+    cutoff_time: datetime,
+    query_sha256: str,
+) -> None:
+    SourceManifest(
+        campaign_id=campaign_id,
+        source_kind="bigquery",
+        source_revision="offline-plan",
+        cutoff_height=cutoff_height,
+        cutoff_hash="00" * 32,
+        cutoff_time=cutoff_time,
+        schema_sha256="00" * 32,
+        query_sha256=query_sha256,
+        source_capabilities=("offline_plan",),
+        script_completeness=True,
+    )
+
+
 def _read_ndjson(path: Path) -> list[dict[str, Any]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -575,6 +938,13 @@ def _parse_utc_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise CliError("Timestamp must be timezone-aware")
     return parsed
+
+
+def _parse_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise CliError("Date must be ISO-8601 YYYY-MM-DD") from exc
 
 
 def _emit(value: dict[str, Any]) -> None:
