@@ -110,12 +110,15 @@ The preferred first-day bootstrap is the public
 `bigquery-public-data.crypto_bitcoin` dataset when a read-only query project is
 available and the source passes freshness, schema, and dry-run cost gates.
 
-The official dataset exposes Bitcoin-like `inputs` and `outputs` tables and was
-designed for address-level value-flow analysis. BigQuery's on-demand free tier
-currently includes the first 1 TiB of query data processed per month, but that
-allowance is account-wide and subject to change. Every production query must
-therefore use a dry run and `maximum_bytes_billed`; the design never assumes a
-query is free merely because the dataset is public.
+The official dataset exposes partitioned `transactions` and `blocks` tables.
+Transaction inputs and outputs are nested records on `transactions`; the
+top-level `inputs` and `outputs` relations are compatibility views and are not
+accepted as partition authorities. The implementation reads the nested records
+from `transactions` and uses `blocks` for checkpoint facts. BigQuery's
+on-demand free tier currently includes the first 1 TiB of query data processed
+per month, but that allowance is account-wide and subject to change. Every
+production query must therefore use a dry run and `maximum_bytes_billed`; the
+design never assumes a query is free merely because the dataset is public.
 
 Official references:
 

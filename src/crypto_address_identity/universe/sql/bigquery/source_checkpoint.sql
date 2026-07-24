@@ -1,13 +1,15 @@
 -- btc_source_checkpoint_v1
-WITH recent_outputs AS (
+WITH recent_blocks AS (
   SELECT
-    block_number,
-    block_hash,
-    block_timestamp,
-    addresses
-  FROM {{OUTPUTS_TABLE}}
-  WHERE DATE(block_timestamp) >= DATE_SUB(@as_of_date, INTERVAL 7 DAY)
-    AND DATE(block_timestamp) < @as_of_date
+    source_block.number AS block_number,
+    source_block.hash AS block_hash,
+    source_block.timestamp AS block_timestamp
+  FROM {{BLOCKS_TABLE}} AS source_block
+  WHERE source_block.timestamp_month BETWEEN
+      DATE_TRUNC(DATE_SUB(@as_of_date, INTERVAL 7 DAY), MONTH)
+      AND DATE_TRUNC(DATE_SUB(@as_of_date, INTERVAL 1 DAY), MONTH)
+    AND DATE(source_block.timestamp) >= DATE_SUB(@as_of_date, INTERVAL 7 DAY)
+    AND DATE(source_block.timestamp) < @as_of_date
 ),
 ranked_blocks AS (
   SELECT
@@ -15,8 +17,18 @@ ranked_blocks AS (
     block_hash,
     MAX(block_timestamp) AS block_timestamp,
     ROW_NUMBER() OVER (ORDER BY block_number DESC) AS block_rank
-  FROM recent_outputs
+  FROM recent_blocks
   GROUP BY block_number, block_hash
+),
+recent_outputs AS (
+  SELECT output.addresses
+  FROM {{TRANSACTIONS_TABLE}} AS tx
+  CROSS JOIN UNNEST(tx.outputs) AS output
+  WHERE tx.block_timestamp_month BETWEEN
+      DATE_TRUNC(DATE_SUB(@as_of_date, INTERVAL 7 DAY), MONTH)
+      AND DATE_TRUNC(DATE_SUB(@as_of_date, INTERVAL 1 DAY), MONTH)
+    AND DATE(tx.block_timestamp) >= DATE_SUB(@as_of_date, INTERVAL 7 DAY)
+    AND DATE(tx.block_timestamp) < @as_of_date
 ),
 checkpoint AS (
   SELECT

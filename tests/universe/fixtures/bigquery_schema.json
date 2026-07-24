@@ -1,39 +1,61 @@
 {
-  "outputs": {
-    "table_id": "bigquery-public-data.crypto_bitcoin.outputs",
-    "partition_field": "block_timestamp",
+  "transactions": {
+    "table_id": "bigquery-public-data.crypto_bitcoin.transactions",
+    "partition_field": "block_timestamp_month",
     "partition_type": "DAY",
     "modified_at": "2026-07-24T00:15:00Z",
     "fields": [
-      {"name": "block_number", "field_type": "INTEGER", "mode": "NULLABLE"},
-      {"name": "block_hash", "field_type": "STRING", "mode": "NULLABLE"},
-      {"name": "block_timestamp", "field_type": "TIMESTAMP", "mode": "NULLABLE"},
-      {"name": "transaction_hash", "field_type": "STRING", "mode": "NULLABLE"},
-      {"name": "transaction_index", "field_type": "INTEGER", "mode": "NULLABLE"},
-      {"name": "index", "field_type": "INTEGER", "mode": "NULLABLE"},
-      {"name": "script_hex", "field_type": "STRING", "mode": "NULLABLE"},
-      {"name": "type", "field_type": "STRING", "mode": "NULLABLE"},
-      {"name": "addresses", "field_type": "STRING", "mode": "REPEATED"},
-      {"name": "value", "field_type": "INTEGER", "mode": "NULLABLE"}
+      {"name": "hash", "field_type": "STRING", "mode": "REQUIRED"},
+      {"name": "block_hash", "field_type": "STRING", "mode": "REQUIRED"},
+      {"name": "block_number", "field_type": "INTEGER", "mode": "REQUIRED"},
+      {"name": "block_timestamp", "field_type": "TIMESTAMP", "mode": "REQUIRED"},
+      {"name": "block_timestamp_month", "field_type": "DATE", "mode": "REQUIRED"},
+      {
+        "name": "inputs",
+        "field_type": "RECORD",
+        "mode": "REPEATED",
+        "fields": [
+          {"name": "index", "field_type": "INTEGER", "mode": "REQUIRED"},
+          {
+            "name": "spent_transaction_hash",
+            "field_type": "STRING",
+            "mode": "NULLABLE"
+          },
+          {
+            "name": "spent_output_index",
+            "field_type": "INTEGER",
+            "mode": "NULLABLE"
+          },
+          {"name": "script_hex", "field_type": "STRING", "mode": "NULLABLE"},
+          {"name": "type", "field_type": "STRING", "mode": "NULLABLE"},
+          {"name": "addresses", "field_type": "STRING", "mode": "REPEATED"},
+          {"name": "value", "field_type": "NUMERIC", "mode": "NULLABLE"}
+        ]
+      },
+      {
+        "name": "outputs",
+        "field_type": "RECORD",
+        "mode": "REPEATED",
+        "fields": [
+          {"name": "index", "field_type": "INTEGER", "mode": "REQUIRED"},
+          {"name": "script_hex", "field_type": "STRING", "mode": "NULLABLE"},
+          {"name": "type", "field_type": "STRING", "mode": "NULLABLE"},
+          {"name": "addresses", "field_type": "STRING", "mode": "REPEATED"},
+          {"name": "value", "field_type": "NUMERIC", "mode": "NULLABLE"}
+        ]
+      }
     ]
   },
-  "inputs": {
-    "table_id": "bigquery-public-data.crypto_bitcoin.inputs",
-    "partition_field": "block_timestamp",
+  "blocks": {
+    "table_id": "bigquery-public-data.crypto_bitcoin.blocks",
+    "partition_field": "timestamp_month",
     "partition_type": "DAY",
     "modified_at": "2026-07-24T00:15:00Z",
     "fields": [
-      {"name": "block_number", "field_type": "INTEGER", "mode": "NULLABLE"},
-      {"name": "block_hash", "field_type": "STRING", "mode": "NULLABLE"},
-      {"name": "block_timestamp", "field_type": "TIMESTAMP", "mode": "NULLABLE"},
-      {"name": "transaction_hash", "field_type": "STRING", "mode": "NULLABLE"},
-      {"name": "transaction_index", "field_type": "INTEGER", "mode": "NULLABLE"},
-      {"name": "index", "field_type": "INTEGER", "mode": "NULLABLE"},
-      {"name": "spent_transaction_hash", "field_type": "STRING", "mode": "NULLABLE"},
-      {"name": "spent_output_index", "field_type": "INTEGER", "mode": "NULLABLE"},
-      {"name": "type", "field_type": "STRING", "mode": "NULLABLE"},
-      {"name": "addresses", "field_type": "STRING", "mode": "REPEATED"},
-      {"name": "value", "field_type": "INTEGER", "mode": "NULLABLE"}
+      {"name": "hash", "field_type": "STRING", "mode": "REQUIRED"},
+      {"name": "number", "field_type": "INTEGER", "mode": "REQUIRED"},
+      {"name": "timestamp", "field_type": "TIMESTAMP", "mode": "REQUIRED"},
+      {"name": "timestamp_month", "field_type": "DATE", "mode": "REQUIRED"}
     ]
   }
 }

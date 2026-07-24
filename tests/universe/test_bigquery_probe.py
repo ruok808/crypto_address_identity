@@ -91,14 +91,29 @@ def test_bigquery_query_plan_is_partition_bounded_and_deterministic() -> None:
 
     assert plan.address_features_sha256 == repeated.address_features_sha256
     assert "ARRAY_LENGTH(addresses) = 1" in plan.address_features_sql
-    assert "(block_hash, transaction_index)" in plan.address_features_sql
+    assert "(block_hash, transaction_hash)" in plan.address_features_sql
     assert "@cutoff_height" in plan.address_features_sql
     assert "@window_365d_start" in plan.address_features_sql
-    assert "bigquery-public-data.crypto_bitcoin.outputs" in plan.address_features_sql
-    assert "LOWER(script_hex) AS script_hex" in plan.address_features_sql
+    assert (
+        plan.address_features_sql.count(
+            "bigquery-public-data.crypto_bitcoin.transactions"
+        )
+        == 1
+    )
+    assert "UNNEST(tx.outputs)" in plan.address_features_sql
+    assert "UNNEST(tx.inputs)" in plan.address_features_sql
+    assert "block_timestamp_month" in plan.address_features_sql
+    assert "LOWER(io.script_hex) AS script_hex" in plan.address_features_sql
     assert "LOWER(TO_HEX(" in plan.address_features_sql
     assert "missing_script_hex_rows" in plan.address_features_sql
     assert "DATE_SUB(@as_of_date, INTERVAL 7 DAY)" in plan.source_checkpoint_sql
+    assert "bigquery-public-data.crypto_bitcoin.blocks" in plan.source_checkpoint_sql
+    assert (
+        "bigquery-public-data.crypto_bitcoin.transactions"
+        in plan.source_checkpoint_sql
+    )
+    assert "timestamp_month" in plan.source_checkpoint_sql
+    assert "block_timestamp_month" in plan.source_checkpoint_sql
     assert "LIMIT 1" in plan.source_checkpoint_sql
     assert "fixture-project" not in plan.address_features_sql
 
@@ -186,28 +201,22 @@ def test_bigquery_probe_warns_when_recent_taproot_count_is_zero() -> None:
     ("mutator", "reason"),
     [
         (
-            lambda tables: tables["outputs"].model_copy(
-                update={
-                    "fields": tuple(
-                        field
-                        for field in tables["outputs"].fields
-                        if field.name != "script_hex"
-                    )
-                }
+            lambda tables: _drop_nested_field(
+                tables["transactions"], "outputs", "script_hex"
             ),
-            "bigquery_outputs_schema_mismatch",
+            "bigquery_transactions_schema_mismatch",
         ),
         (
-            lambda tables: tables["inputs"].model_copy(
+            lambda tables: tables["transactions"].model_copy(
                 update={"partition_field": None}
             ),
-            "bigquery_inputs_not_time_partitioned",
+            "bigquery_transactions_not_time_partitioned",
         ),
         (
-            lambda tables: tables["outputs"].model_copy(
+            lambda tables: tables["blocks"].model_copy(
                 update={"modified_at": NOW - timedelta(days=3)}
             ),
-            "bigquery_outputs_stale",
+            "bigquery_blocks_stale",
         ),
     ],
 )
@@ -235,6 +244,71 @@ def test_bigquery_probe_blocks_schema_partition_or_freshness_drift(
 
     assert result.status == "blocked"
     assert reason in result.blocking_reasons
+
+
+def _drop_nested_field(
+    metadata: TableMetadata,
+    container_name: str,
+    field_name: str,
+) -> TableMetadata:
+    fields = []
+    for field in metadata.fields:
+        if field.name == container_name:
+            field = field.model_copy(
+                update={
+                    "fields": tuple(
+                        child for child in field.fields if child.name != field_name
+                    )
+                }
+            )
+        fields.append(field)
+    return metadata.model_copy(update={"fields": tuple(fields)})
+
+
+def test_google_backend_preserves_nested_schema_fields() -> None:
+    class FakeSchemaField:
+        def __init__(
+            self,
+            name: str,
+            field_type: str,
+            mode: str,
+            fields: tuple["FakeSchemaField", ...] = (),
+        ) -> None:
+            self.name = name
+            self.field_type = field_type
+            self.mode = mode
+            self.fields = fields
+
+    class FakePartitioning:
+        field = "block_timestamp_month"
+        type_ = "DAY"
+
+    class FakeTable:
+        schema = (
+            FakeSchemaField(
+                "outputs",
+                "RECORD",
+                "REPEATED",
+                (FakeSchemaField("script_hex", "STRING", "NULLABLE"),),
+            ),
+        )
+        time_partitioning = FakePartitioning()
+        modified = NOW
+
+    class FakeClient:
+        def get_table(self, table_id: str) -> FakeTable:
+            assert table_id.endswith(".transactions")
+            return FakeTable()
+
+    backend = object.__new__(GoogleBigQueryBackend)
+    backend._client = FakeClient()
+
+    metadata = backend.table_metadata(
+        "bigquery-public-data.crypto_bitcoin.transactions"
+    )
+
+    assert metadata.fields[0].name == "outputs"
+    assert metadata.fields[0].fields[0].name == "script_hex"
 
 
 def test_bigquery_probe_blocks_estimate_above_cap() -> None:

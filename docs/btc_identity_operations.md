@@ -42,7 +42,9 @@ Follow this exact operating sequence:
    checkpoint query. The full-history feature query remains an unbilled
    BigQuery dry run so its actual byte estimate can be reported even when it
    exceeds that checkpoint cap. Record only schema hashes, query hashes,
-   aggregate bytes, and checkpoint facts.
+   aggregate bytes, and checkpoint facts. The accepted source contract uses
+   partitioned `transactions` and `blocks` tables. It rejects the flattened
+   `inputs` and `outputs` compatibility views as partition authorities.
 3. **Bitcoin Core read-only probe.** Run only the four allow-listed RPCs:
    `getblockchaininfo`, `getblockhash`, `getblockheader`, and `getindexinfo`.
    Cookie content, authorization data, and raw RPC errors never enter output.
@@ -87,6 +89,12 @@ bytes but cannot know the account's remaining free-tier allowance.
 A pruned Bitcoin Core node cannot prove historical script coverage; it reports
 partial capability and the workflow stops before claiming chain-universe
 completeness.
+
+If Bitcoin Core is unavailable, record `reconciliation_status=partial` and stop
+before `universe build bigquery`, even when the BigQuery source probe itself is
+accepted. A full-history dry-run above the reviewed account or storage budget
+is also a stop condition; do not raise the execution cap merely to obtain an
+address count.
 
 The immutable campaign stores scripts and address features under
 `CAI_UNIVERSE_ROOT`. It snapshots only the minimal checksum-pinned calibration

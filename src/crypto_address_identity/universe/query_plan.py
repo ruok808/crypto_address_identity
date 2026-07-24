@@ -20,8 +20,8 @@ class InvalidBigQueryDataset(ValueError):
 @dataclass(frozen=True)
 class BigQueryQueryPlan:
     dataset: str
-    outputs_table_id: str
-    inputs_table_id: str
+    transactions_table_id: str
+    blocks_table_id: str
     address_features_sql: str
     source_checkpoint_sql: str
     address_features_sha256: str
@@ -40,11 +40,11 @@ class BigQueryQueryPlan:
             package_root.joinpath("sql/bigquery/source_checkpoint.sql")
             .read_text(encoding="utf-8")
         )
-        outputs_table_id = f"{dataset}.outputs"
-        inputs_table_id = f"{dataset}.inputs"
+        transactions_table_id = f"{dataset}.transactions"
+        blocks_table_id = f"{dataset}.blocks"
         replacements = {
-            "{{OUTPUTS_TABLE}}": f"`{outputs_table_id}`",
-            "{{INPUTS_TABLE}}": f"`{inputs_table_id}`",
+            "{{TRANSACTIONS_TABLE}}": f"`{transactions_table_id}`",
+            "{{BLOCKS_TABLE}}": f"`{blocks_table_id}`",
         }
         address_sql = address_template
         checkpoint_sql = checkpoint_template
@@ -55,8 +55,8 @@ class BigQueryQueryPlan:
             raise InvalidBigQueryDataset("BigQuery SQL contains an unresolved marker")
         return cls(
             dataset=dataset,
-            outputs_table_id=outputs_table_id,
-            inputs_table_id=inputs_table_id,
+            transactions_table_id=transactions_table_id,
+            blocks_table_id=blocks_table_id,
             address_features_sql=address_sql,
             source_checkpoint_sql=checkpoint_sql,
             address_features_sha256=cls.hash_sql(address_sql),

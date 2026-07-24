@@ -1,39 +1,82 @@
 -- btc_address_features_v1
--- Same-transaction aggregation key: (block_hash, transaction_index).
+-- Same-transaction aggregation key: (block_hash, transaction_hash).
 -- Source table identifiers are inserted only after strict dataset validation.
 WITH
+transaction_io_rows AS (
+  SELECT
+    tx.block_number,
+    tx.block_hash,
+    tx.block_timestamp,
+    tx.hash AS transaction_hash,
+    io.row_kind,
+    io.item_index,
+    io.spent_transaction_hash,
+    io.spent_output_index,
+    io.script_hex,
+    io.script_type,
+    io.addresses,
+    SAFE_CAST(io.value AS INT64) AS value_sats
+  FROM {{TRANSACTIONS_TABLE}} AS tx
+  CROSS JOIN UNNEST(
+    ARRAY_CONCAT(
+      ARRAY(
+        SELECT AS STRUCT
+          'output' AS row_kind,
+          output.index AS item_index,
+          CAST(NULL AS STRING) AS spent_transaction_hash,
+          CAST(NULL AS INT64) AS spent_output_index,
+          output.script_hex AS script_hex,
+          output.type AS script_type,
+          output.addresses AS addresses,
+          output.value AS value
+        FROM UNNEST(tx.outputs) AS output
+      ),
+      ARRAY(
+        SELECT AS STRUCT
+          'input' AS row_kind,
+          input.index AS item_index,
+          input.spent_transaction_hash AS spent_transaction_hash,
+          input.spent_output_index AS spent_output_index,
+          input.script_hex AS script_hex,
+          input.type AS script_type,
+          input.addresses AS addresses,
+          input.value AS value
+        FROM UNNEST(tx.inputs) AS input
+      )
+    )
+  ) AS io
+  WHERE tx.block_number <= @cutoff_height
+    AND tx.block_timestamp <= @cutoff_time
+    AND tx.block_timestamp_month <= DATE_TRUNC(DATE(@cutoff_time), MONTH)
+),
 outputs_base AS (
   SELECT
-    block_number,
-    block_hash,
-    block_timestamp,
-    transaction_hash,
-    transaction_index,
-    `index` AS output_index,
-    LOWER(script_hex) AS script_hex,
-    type AS script_type,
-    addresses,
-    CAST(value AS INT64) AS value_sats
-  FROM {{OUTPUTS_TABLE}}
-  WHERE block_number <= @cutoff_height
-    AND block_timestamp <= @cutoff_time
+    io.block_number,
+    io.block_hash,
+    io.block_timestamp,
+    io.transaction_hash,
+    io.item_index AS output_index,
+    LOWER(io.script_hex) AS script_hex,
+    io.script_type,
+    io.addresses,
+    io.value_sats
+  FROM transaction_io_rows AS io
+  WHERE io.row_kind = 'output'
 ),
 inputs_base AS (
   SELECT
-    block_number,
-    block_hash,
-    block_timestamp,
-    transaction_hash,
-    transaction_index,
-    `index` AS input_index,
-    spent_transaction_hash,
-    spent_output_index,
-    type AS script_type,
-    addresses,
-    CAST(value AS INT64) AS value_sats
-  FROM {{INPUTS_TABLE}}
-  WHERE block_number <= @cutoff_height
-    AND block_timestamp <= @cutoff_time
+    io.block_number,
+    io.block_hash,
+    io.block_timestamp,
+    io.transaction_hash,
+    io.item_index AS input_index,
+    io.spent_transaction_hash,
+    io.spent_output_index,
+    io.script_type,
+    io.addresses,
+    io.value_sats
+  FROM transaction_io_rows AS io
+  WHERE io.row_kind = 'input'
 ),
 output_address_rows AS (
   SELECT
@@ -41,7 +84,6 @@ output_address_rows AS (
     block_hash,
     block_timestamp,
     transaction_hash,
-    transaction_index,
     output_index,
     script_type,
     addresses[OFFSET(0)] AS normalized_address,
@@ -55,7 +97,6 @@ input_address_rows AS (
     block_hash,
     block_timestamp,
     transaction_hash,
-    transaction_index,
     input_index,
     script_type,
     addresses[OFFSET(0)] AS normalized_address,
@@ -66,14 +107,14 @@ input_address_rows AS (
 received_by_transaction AS (
   SELECT
     block_hash,
-    transaction_index,
+    transaction_hash,
     normalized_address,
     SUM(value_sats) AS same_tx_received_sats
   FROM output_address_rows
-  GROUP BY block_hash, transaction_index, normalized_address
+  GROUP BY block_hash, transaction_hash, normalized_address
 ),
 large_transaction_addresses AS (
-  SELECT block_hash, transaction_index, normalized_address
+  SELECT block_hash, transaction_hash, normalized_address
   FROM received_by_transaction
   WHERE same_tx_received_sats >= 10000000000
 ),
@@ -83,7 +124,7 @@ large_counterparties AS (
     COUNT(DISTINCT right_side.normalized_address) AS direct_large_counterparty_count
   FROM large_transaction_addresses AS left_side
   JOIN large_transaction_addresses AS right_side
-    USING (block_hash, transaction_index)
+    USING (block_hash, transaction_hash)
   WHERE left_side.normalized_address != right_side.normalized_address
   GROUP BY left_side.normalized_address
 ),
@@ -96,7 +137,7 @@ output_aggregates AS (
     MIN(block_timestamp) AS first_output_time,
     MAX(block_timestamp) AS last_output_time,
     COUNT(*) AS output_count,
-    COUNT(DISTINCT CONCAT(block_hash, ':', CAST(transaction_index AS STRING)))
+    COUNT(DISTINCT CONCAT(block_hash, ':', transaction_hash))
       AS output_transaction_count,
     SUM(value_sats) AS lifetime_received_sats,
     MAX(value_sats) AS max_single_output_sats,
@@ -114,7 +155,7 @@ input_aggregates AS (
     MIN(block_timestamp) AS first_input_time,
     MAX(block_timestamp) AS last_input_time,
     COUNT(*) AS spent_output_count,
-    COUNT(DISTINCT CONCAT(block_hash, ':', CAST(transaction_index AS STRING)))
+    COUNT(DISTINCT CONCAT(block_hash, ':', transaction_hash))
       AS input_transaction_count,
     SUM(value_sats) AS lifetime_spent_sats,
     SUM(IF(block_timestamp >= @window_30d_start, value_sats, 0)) AS outflow_30d_sats,
@@ -130,12 +171,12 @@ transaction_counts AS (
   FROM (
     SELECT
       normalized_address,
-      CONCAT(block_hash, ':', CAST(transaction_index AS STRING)) AS transaction_key
+      CONCAT(block_hash, ':', transaction_hash) AS transaction_key
     FROM output_address_rows
     UNION ALL
     SELECT
       normalized_address,
-      CONCAT(block_hash, ':', CAST(transaction_index AS STRING)) AS transaction_key
+      CONCAT(block_hash, ':', transaction_hash) AS transaction_key
     FROM input_address_rows
   )
   GROUP BY normalized_address
@@ -220,7 +261,7 @@ script_subjects AS (
     ) AS address_id,
     ARRAY_LENGTH(ANY_VALUE(addresses)) = 1 AS provider_enrichable
   FROM outputs_base
-  GROUP BY script_hex
+  GROUP BY outputs_base.script_hex
 ),
 source_accounting AS (
   SELECT
@@ -334,6 +375,7 @@ SELECT
   NULL,
   NULL,
   FALSE,
+  NULL,
   NULL,
   NULL,
   NULL,

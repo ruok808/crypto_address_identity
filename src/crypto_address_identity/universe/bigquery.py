@@ -30,6 +30,7 @@ class TableField(UniverseModel):
     name: str
     field_type: str
     mode: str
+    fields: tuple["TableField", ...] = ()
 
     @field_validator("field_type", "mode")
     @classmethod
@@ -100,30 +101,36 @@ class BigQueryBackend(Protocol):
     ) -> Iterator[object]: ...
 
 
-_OUTPUT_FIELDS = {
-    "block_number": ("INTEGER", "NULLABLE"),
-    "block_hash": ("STRING", "NULLABLE"),
-    "block_timestamp": ("TIMESTAMP", "NULLABLE"),
-    "transaction_hash": ("STRING", "NULLABLE"),
-    "transaction_index": ("INTEGER", "NULLABLE"),
-    "index": ("INTEGER", "NULLABLE"),
+_TRANSACTION_FIELDS = {
+    "hash": ("STRING", "REQUIRED"),
+    "block_hash": ("STRING", "REQUIRED"),
+    "block_number": ("INTEGER", "REQUIRED"),
+    "block_timestamp": ("TIMESTAMP", "REQUIRED"),
+    "block_timestamp_month": ("DATE", "REQUIRED"),
+    "inputs": ("RECORD", "REPEATED"),
+    "outputs": ("RECORD", "REPEATED"),
+}
+_TRANSACTION_INPUT_FIELDS = {
+    "index": ("INTEGER", "REQUIRED"),
+    "spent_transaction_hash": ("STRING", "NULLABLE"),
+    "spent_output_index": ("INTEGER", "NULLABLE"),
     "script_hex": ("STRING", "NULLABLE"),
     "type": ("STRING", "NULLABLE"),
     "addresses": ("STRING", "REPEATED"),
-    "value": ("INTEGER", "NULLABLE"),
+    "value": ("NUMERIC", "NULLABLE"),
 }
-_INPUT_FIELDS = {
-    "block_number": ("INTEGER", "NULLABLE"),
-    "block_hash": ("STRING", "NULLABLE"),
-    "block_timestamp": ("TIMESTAMP", "NULLABLE"),
-    "transaction_hash": ("STRING", "NULLABLE"),
-    "transaction_index": ("INTEGER", "NULLABLE"),
-    "index": ("INTEGER", "NULLABLE"),
-    "spent_transaction_hash": ("STRING", "NULLABLE"),
-    "spent_output_index": ("INTEGER", "NULLABLE"),
+_TRANSACTION_OUTPUT_FIELDS = {
+    "index": ("INTEGER", "REQUIRED"),
+    "script_hex": ("STRING", "NULLABLE"),
     "type": ("STRING", "NULLABLE"),
     "addresses": ("STRING", "REPEATED"),
-    "value": ("INTEGER", "NULLABLE"),
+    "value": ("NUMERIC", "NULLABLE"),
+}
+_BLOCK_FIELDS = {
+    "hash": ("STRING", "REQUIRED"),
+    "number": ("INTEGER", "REQUIRED"),
+    "timestamp": ("TIMESTAMP", "REQUIRED"),
+    "timestamp_month": ("DATE", "REQUIRED"),
 }
 
 
@@ -157,13 +164,15 @@ class BigQueryProbe:
         checkpoint_maximum_bytes_billed: int,
     ) -> SourceProbeResult:
         try:
-            outputs = self._backend.table_metadata(self._plan.outputs_table_id)
-            inputs = self._backend.table_metadata(self._plan.inputs_table_id)
+            transactions = self._backend.table_metadata(
+                self._plan.transactions_table_id
+            )
+            blocks = self._backend.table_metadata(self._plan.blocks_table_id)
         except Exception:
             return self._blocked("bigquery_metadata_unavailable")
 
-        reasons = self._metadata_reasons(outputs, inputs)
-        schema_sha256 = self._combined_schema_hash(outputs, inputs)
+        reasons = self._metadata_reasons(transactions, blocks)
+        schema_sha256 = self._combined_schema_hash(transactions, blocks)
         if reasons:
             return self._blocked(*reasons, schema_sha256=schema_sha256)
 
@@ -265,37 +274,80 @@ class BigQueryProbe:
         )
 
     def _metadata_reasons(
-        self, outputs: TableMetadata, inputs: TableMetadata
+        self, transactions: TableMetadata, blocks: TableMetadata
     ) -> tuple[str, ...]:
         reasons: list[str] = []
-        for name, metadata, required in (
-            ("outputs", outputs, _OUTPUT_FIELDS),
-            ("inputs", inputs, _INPUT_FIELDS),
+        transaction_fields = self._field_contracts(transactions.fields)
+        transaction_schema_matches = self._contains_contract(
+            transaction_fields, _TRANSACTION_FIELDS
+        )
+        for container_name, required in (
+            ("inputs", _TRANSACTION_INPUT_FIELDS),
+            ("outputs", _TRANSACTION_OUTPUT_FIELDS),
         ):
-            fields = {
-                field.name: (field.field_type, field.mode)
-                for field in metadata.fields
-            }
-            if any(fields.get(field_name) != contract for field_name, contract in required.items()):
-                reasons.append(f"bigquery_{name}_schema_mismatch")
-            if (
-                metadata.partition_field != "block_timestamp"
-                or metadata.partition_type != "DAY"
+            container = next(
+                (
+                    field
+                    for field in transactions.fields
+                    if field.name == container_name
+                ),
+                None,
+            )
+            if container is None or not self._contains_contract(
+                self._field_contracts(container.fields), required
             ):
-                reasons.append(f"bigquery_{name}_not_time_partitioned")
-            if self._now - metadata.modified_at > self._max_source_age:
-                reasons.append(f"bigquery_{name}_stale")
+                transaction_schema_matches = False
+        if not transaction_schema_matches:
+            reasons.append("bigquery_transactions_schema_mismatch")
+        if (
+            transactions.partition_field != "block_timestamp_month"
+            or transactions.partition_type != "DAY"
+        ):
+            reasons.append("bigquery_transactions_not_time_partitioned")
+        if self._now - transactions.modified_at > self._max_source_age:
+            reasons.append("bigquery_transactions_stale")
+
+        if not self._contains_contract(
+            self._field_contracts(blocks.fields), _BLOCK_FIELDS
+        ):
+            reasons.append("bigquery_blocks_schema_mismatch")
+        if (
+            blocks.partition_field != "timestamp_month"
+            or blocks.partition_type != "DAY"
+        ):
+            reasons.append("bigquery_blocks_not_time_partitioned")
+        if self._now - blocks.modified_at > self._max_source_age:
+            reasons.append("bigquery_blocks_stale")
         return tuple(sorted(set(reasons)))
 
     @staticmethod
+    def _field_contracts(
+        fields: tuple[TableField, ...],
+    ) -> dict[str, tuple[str, str]]:
+        return {
+            field.name: (field.field_type, field.mode)
+            for field in fields
+        }
+
+    @staticmethod
+    def _contains_contract(
+        actual: Mapping[str, tuple[str, str]],
+        required: Mapping[str, tuple[str, str]],
+    ) -> bool:
+        return all(
+            actual.get(field_name) == contract
+            for field_name, contract in required.items()
+        )
+
+    @staticmethod
     def _combined_schema_hash(
-        outputs: TableMetadata, inputs: TableMetadata
+        transactions: TableMetadata, blocks: TableMetadata
     ) -> str:
         return hashlib.sha256(
             json.dumps(
                 {
-                    "outputs": outputs.schema_sha256,
-                    "inputs": inputs.schema_sha256,
+                    "transactions": transactions.schema_sha256,
+                    "blocks": blocks.schema_sha256,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -369,12 +421,21 @@ class GoogleBigQueryBackend:
         except Exception as exc:
             raise BigQueryBoundaryError("BigQuery metadata is unavailable") from exc
         partitioning = getattr(table, "time_partitioning", None)
+
+        def convert_field(field: object) -> TableField:
+            return TableField(
+                name=field.name,
+                field_type=field.field_type,
+                mode=field.mode,
+                fields=tuple(
+                    convert_field(child)
+                    for child in getattr(field, "fields", ())
+                ),
+            )
+
         return TableMetadata(
             table_id=table_id,
-            fields=tuple(
-                TableField(name=field.name, field_type=field.field_type, mode=field.mode)
-                for field in table.schema
-            ),
+            fields=tuple(convert_field(field) for field in table.schema),
             partition_field=(
                 getattr(partitioning, "field", None) if partitioning else None
             ),
