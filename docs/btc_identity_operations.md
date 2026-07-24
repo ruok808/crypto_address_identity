@@ -38,7 +38,10 @@ Follow this exact operating sequence:
    constructing a Google SDK, Bitcoin RPC, or 0xRouter client.
 2. **BigQuery metadata and dry-run probe.** After a separate read-only
    approval, use `--execute-readonly` with a positive
-   `--maximum-bytes-billed` cap. Record only schema hashes, query hashes,
+   `--maximum-bytes-billed` cap. The cap applies to the executing seven-day
+   checkpoint query. The full-history feature query remains an unbilled
+   BigQuery dry run so its actual byte estimate can be reported even when it
+   exceeds that checkpoint cap. Record only schema hashes, query hashes,
    aggregate bytes, and checkpoint facts.
 3. **Bitcoin Core read-only probe.** Run only the four allow-listed RPCs:
    `getblockchaininfo`, `getblockhash`, `getblockheader`, and `getindexinfo`.

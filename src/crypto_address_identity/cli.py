@@ -711,7 +711,7 @@ def _handle_universe_probe_bigquery(
         as_of_date=as_of_date,
         cutoff_height=None,
         cutoff_time=cutoff_time,
-        maximum_bytes_billed=arguments.maximum_bytes_billed,
+        maximum_bytes_billed=0,
         execute_checkpoint=True,
         checkpoint_maximum_bytes_billed=arguments.maximum_bytes_billed,
     )

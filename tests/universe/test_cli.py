@@ -24,6 +24,8 @@ class FakeBigQueryBackend:
     def __init__(self) -> None:
         self.tables = table_metadata()
         self.calls: list[str] = []
+        self.dry_run_caps: list[int] = []
+        self.query_caps: list[int] = []
         self.last_query_total_bytes_processed = 900
 
     def table_metadata(self, table_id: str):
@@ -37,6 +39,7 @@ class FakeBigQueryBackend:
         maximum_bytes_billed: int,
     ) -> QueryEstimate:
         self.calls.append("dry_run")
+        self.dry_run_caps.append(maximum_bytes_billed)
         return QueryEstimate(total_bytes_processed=900, cache_hit=False)
 
     def query_one(
@@ -47,6 +50,7 @@ class FakeBigQueryBackend:
         maximum_bytes_billed: int,
     ) -> dict[str, object]:
         self.calls.append("query_one")
+        self.query_caps.append(maximum_bytes_billed)
         return {
             "latest_height": 900_010,
             "latest_hash": "10" * 32,
@@ -209,6 +213,8 @@ def test_bigquery_execute_readonly_uses_injected_backend_and_safe_json(
         "dry_run",
         "query_one",
     ]
+    assert backend.dry_run_caps == [0]
+    assert backend.query_caps == [1_000]
     assert "credential" not in json.dumps(output).lower()
 
 
