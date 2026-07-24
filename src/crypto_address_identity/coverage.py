@@ -321,8 +321,22 @@ class CoverageSyncService:
                     try:
                         addresses = parse_prediction_addresses(predictions.payload)
                     except CoveragePayloadError:
+                        self._record_prediction_parse_result(
+                            observation_id=predictions.observation_id,
+                            entity_id=entity_id,
+                            parse_outcome="malformed_payload",
+                            observed_at=observed_at,
+                        )
                         outcomes["malformed_payload"] += 1
                     else:
+                        self._record_prediction_parse_result(
+                            observation_id=predictions.observation_id,
+                            entity_id=entity_id,
+                            parse_outcome=(
+                                "parsed_success" if addresses else "no_bitcoin_addresses"
+                            ),
+                            observed_at=observed_at,
+                        )
                         inserted, duplicates = self._record_predictions(
                             observation_id=predictions.observation_id,
                             entity_id=entity_id,
@@ -443,6 +457,18 @@ class CoverageSyncService:
                     (freshness_cutoff,),
                 ).fetchall()
             }
+            fresh_prediction_entities = {
+                row["provider_entity_id"]
+                for row in connection.execute(
+                    """
+                    SELECT provider_entity_id FROM coverage_entity_prediction_parse_result
+                    WHERE parse_outcome IN ('parsed_success', 'no_bitcoin_addresses')
+                      AND parsed_at > ?
+                    """,
+                    (freshness_cutoff,),
+                ).fetchall()
+            }
+            fresh_entities &= fresh_prediction_entities
             for entity_id in extra_entity_ids:
                 if entity_id not in fresh_entities:
                     priority[entity_id] = max(priority.get(entity_id, 0), 50)
@@ -461,11 +487,10 @@ class CoverageSyncService:
                 SELECT provider_entity_id FROM coverage_entity_observation
                 WHERE discovery_method = 'entity_detail'
                 GROUP BY provider_entity_id
-                HAVING MAX(observed_at) <= ?
-                """,
-                (freshness_cutoff,),
+                """
             ).fetchall():
-                priority.setdefault(row["provider_entity_id"], 50)
+                if row["provider_entity_id"] not in fresh_entities:
+                    priority.setdefault(row["provider_entity_id"], 50)
         return tuple(entity for entity, _ in sorted(priority.items(), key=lambda item: (-item[1], item[0]))[:limit])
 
     def _select_due_addresses(self, *, limit: int, now: datetime) -> tuple[CoverageAddressTarget, ...]:
@@ -537,6 +562,40 @@ class CoverageSyncService:
                 )
             )
         return tuple(selected)
+
+    def _record_prediction_parse_result(
+        self,
+        *,
+        observation_id: str,
+        entity_id: str,
+        parse_outcome: str,
+        observed_at: datetime,
+    ) -> None:
+        timestamp = _utc_string(observed_at)
+        fingerprint = _sha256(
+            {
+                "observation_id": observation_id,
+                "provider_entity_id": entity_id,
+                "parse_outcome": parse_outcome,
+            }
+        )
+        with self.database.write_transaction() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO coverage_entity_prediction_parse_result (
+                    prediction_parse_result_id, prediction_parse_result_fingerprint,
+                    observation_id, provider_entity_id, parse_outcome, parsed_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    fingerprint,
+                    observation_id,
+                    entity_id,
+                    parse_outcome,
+                    timestamp,
+                ),
+            )
 
     def _record_address_parse_result(
         self,
@@ -843,8 +902,6 @@ def parse_prediction_addresses(payload: bytes) -> tuple[str, ...]:
         except BitcoinAddressError:
             continue
         addresses.append(subject.normalized_address)
-    if not addresses:
-        raise CoveragePayloadError("entity predictions has no valid Bitcoin addresses")
     return tuple(dict.fromkeys(addresses))
 
 

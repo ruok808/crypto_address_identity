@@ -97,6 +97,9 @@ def test_coverage_parsers_accept_live_discovery_list_shape_and_entity_aliases() 
     predictions = parse_prediction_addresses(
         json.dumps([SECOND_BTC_ADDRESS, {"address": THIRD_BTC_ADDRESS}]).encode()
     )
+    no_bitcoin_predictions = parse_prediction_addresses(
+        json.dumps(["0xBD612a3f30dcA67bF60a39Fd0D35e39B7aB80774"]).encode()
+    )
 
     assert entities == (
         CoverageEntity(
@@ -107,6 +110,7 @@ def test_coverage_parsers_accept_live_discovery_list_shape_and_entity_aliases() 
         ),
     )
     assert predictions == (SECOND_BTC_ADDRESS, THIRD_BTC_ADDRESS)
+    assert no_bitcoin_predictions == ()
 
 
 def test_entity_seeds_are_append_only_and_deduplicated(env_mapping: dict[str, str]) -> None:
@@ -240,6 +244,36 @@ def test_coverage_execute_fans_out_entities_without_repeating_fresh_detail_or_ad
         assert connection.execute("SELECT COUNT(*) FROM identity_evidence").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM raw_payload_object").fetchone()[0] == 6
     assert calls.count("/chaindata/intelligence/entity_predictions/binance") == 1
+
+
+def test_no_bitcoin_prediction_result_is_cached_without_marking_the_run_malformed(
+    env_mapping: dict[str, str]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/entity_balance_changes"):
+            return httpx.Response(200, json={"entities": [{"id": "binance"}]})
+        if request.url.path.endswith("/entity/binance"):
+            return httpx.Response(200, json={"entity": {"id": "binance"}})
+        if request.url.path.endswith("/entity_predictions/binance"):
+            return httpx.Response(200, json=["0xBD612a3f30dcA67bF60a39Fd0D35e39B7aB80774"])
+        return httpx.Response(404, json={})
+
+    database, service = _service(env_mapping, handler)
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    first = service.run(dry_run=False, now=now)
+    second = service.run(dry_run=False, now=now + timedelta(hours=1))
+
+    assert first.status == "completed"
+    assert first.prediction_requests == 1
+    assert second.entity_detail_requests == 0
+    assert second.prediction_requests == 0
+    with database.read_connection() as connection:
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM coverage_entity_prediction_parse_result
+            WHERE parse_outcome = 'no_bitcoin_addresses'
+            """
+        ).fetchone()[0] == 1
 
 
 def test_malformed_address_enrichment_does_not_enter_the_ttl_cache(env_mapping: dict[str, str]) -> None:

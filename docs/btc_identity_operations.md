@@ -92,6 +92,11 @@ and prediction fan-out, then fills the remaining request capacity with direct
 address enrichment (eight entities leave seven direct-address requests). A
 subsequent run where entity details are still fresh spends that capacity on more
 due addresses instead.
+
+Entity-detail and entity-prediction TTLs are independent: a structurally valid
+prediction response containing no Bitcoin addresses is a terminal BTC-negative
+coverage result for that entity until its TTL expires, while a transport or HTTP
+failure remains due for retry even when the entity detail is fresh.
 It never turns a failed, rate-limited, or malformed response into negative
 evidence. A `403` must be resolved with the gateway before execute mode.
 
