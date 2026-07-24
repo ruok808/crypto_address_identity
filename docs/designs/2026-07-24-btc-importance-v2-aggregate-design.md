@@ -180,6 +180,8 @@ Aggregate the transaction rows once by address:
 - `same_tx_receive_ge_500_btc_365d_count`
 - `active_tx_90d_count`
 - `active_day_90d_count`
+- `active_tx_365d_count`
+- `active_day_365d_count`
 - `last_same_tx_receive_ge_500_btc_time`
 
 Derived features:
@@ -342,7 +344,8 @@ Use the exact P0 policy above.
 
 ### V2-B: Balanced 365-Day, Shadow Only
 
-Use a 365-day receipt window, but require:
+Start with every V2-S strict supported receipt. Additionally accept a 365-day
+receipt when either of these conditions is true:
 
 ```text
 current_utxo_sats >= 10 BTC
@@ -353,11 +356,12 @@ or:
 
 ```text
 same_tx_receive_ge_500_btc_365d_count >= 2
-and active_day_90d_count >= 2
+and active_day_365d_count >= 2
 ```
 
 This variant measures the recall cost of the strict 90-day window. It is not
-eligible for automatic selection.
+eligible for automatic selection. Its receipt and P0 unions must be supersets
+of V2-S; a smaller count is a blocking reconciliation failure.
 
 ### V2-R: Retention-Only, Diagnostic
 
@@ -466,6 +470,7 @@ provider entity, raw request, or source row sample.
 - score histograms do not reconcile to the output-defined source population;
 - receipt-funnel subset monotonicity fails;
 - a v2 supported-receipt count exceeds its lifetime or window parent;
+- V2-B receipt or P0 union is smaller than V2-S;
 - V2-S P0 exceeds `1,000,000`;
 - any variant coarse union exceeds `5,000,000`;
 - edge frontier exceeds `1,000,000`;

@@ -64,6 +64,9 @@ from crypto_address_identity.universe.bitcoin_core import BitcoinCoreProbe
 from crypto_address_identity.universe.candidate_statistics import (
     BigQueryCandidateStatisticsProbe,
 )
+from crypto_address_identity.universe.candidate_statistics_v2 import (
+    BigQueryCandidateStatisticsV2Probe,
+)
 from crypto_address_identity.universe.candidate_execution import (
     CandidateStatisticsExecutionAlreadyAttempted,
     CandidateStatisticsExecutionRequest,
@@ -305,6 +308,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe_probe_candidate_statistics.set_defaults(
         handler=_handle_universe_probe_bigquery_candidate_statistics
+    )
+
+    universe_probe_candidate_statistics_v2 = universe_probe_commands.add_parser(
+        "bigquery-candidate-statistics-v2"
+    )
+    candidate_statistics_v2_mode = (
+        universe_probe_candidate_statistics_v2.add_mutually_exclusive_group(
+            required=True
+        )
+    )
+    candidate_statistics_v2_mode.add_argument("--dry-run", action="store_true")
+    candidate_statistics_v2_mode.add_argument(
+        "--live-dry-run",
+        action="store_true",
+    )
+    universe_probe_candidate_statistics_v2.add_argument(
+        "--as-of-date",
+        required=True,
+    )
+    universe_probe_candidate_statistics_v2.add_argument(
+        "--cutoff-height",
+        type=int,
+        required=True,
+    )
+    universe_probe_candidate_statistics_v2.add_argument(
+        "--expected-query-sha256"
+    )
+    universe_probe_candidate_statistics_v2.add_argument(
+        "--sandbox-budget-bytes",
+        type=int,
+        default=0,
+    )
+    universe_probe_candidate_statistics_v2.add_argument(
+        "--reserve-bytes",
+        type=int,
+        default=250_000_000_000,
+    )
+    universe_probe_candidate_statistics_v2.set_defaults(
+        handler=_handle_universe_probe_bigquery_candidate_statistics_v2
     )
 
     universe_execute = universe_commands.add_parser("execute")
@@ -927,6 +969,65 @@ def _handle_universe_probe_bigquery_candidate_statistics(
         raise CliError("BigQuery reserve must be below Sandbox budget")
 
     result = BigQueryCandidateStatisticsProbe(
+        backend=_make_bigquery_backend(settings),
+        dataset=settings.bigquery_dataset,
+        max_source_age=timedelta(
+            hours=settings.universe_max_source_age_hours
+        ),
+    ).run(
+        cutoff_height=arguments.cutoff_height,
+        cutoff_time=cutoff_time,
+        expected_query_sha256=arguments.expected_query_sha256,
+        sandbox_budget_bytes=arguments.sandbox_budget_bytes,
+        reserve_bytes=arguments.reserve_bytes,
+    )
+    return {
+        **result.model_dump(mode="json"),
+        "as_of_date": as_of_date.isoformat(),
+        "cutoff_height": arguments.cutoff_height,
+        "cutoff_time": cutoff_time.isoformat().replace("+00:00", "Z"),
+        "provider_requests": 0,
+        "provider_points": 0,
+        "written_paths": [],
+    }
+
+
+def _handle_universe_probe_bigquery_candidate_statistics_v2(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    as_of_date = _parse_date(arguments.as_of_date)
+    if arguments.cutoff_height < 0:
+        raise CliError("cutoff height must be non-negative")
+    cutoff_time = datetime.combine(as_of_date, time.max, tzinfo=UTC)
+    plan = BigQueryQueryPlan.load(settings.bigquery_dataset)
+    if arguments.dry_run:
+        return {
+            "status": "dry_run",
+            "source_kind": "bigquery",
+            "query_kind": "btc_candidate_statistics_v2",
+            "policy_version": "btc_importance_v2",
+            "read_only": True,
+            "as_of_date": as_of_date.isoformat(),
+            "cutoff_height": arguments.cutoff_height,
+            "cutoff_time": cutoff_time.isoformat().replace("+00:00", "Z"),
+            "query_sha256": plan.candidate_statistics_v2_sha256,
+            "network_requests": 0,
+            "provider_requests": 0,
+            "provider_points": 0,
+            "written_paths": [],
+        }
+    if not arguments.expected_query_sha256:
+        raise CliError("expected v2 candidate query SHA-256 required")
+    if arguments.sandbox_budget_bytes <= 0:
+        raise CliError("positive BigQuery Sandbox budget required")
+    if (
+        arguments.reserve_bytes < 0
+        or arguments.reserve_bytes >= arguments.sandbox_budget_bytes
+    ):
+        raise CliError("BigQuery reserve must be below Sandbox budget")
+
+    result = BigQueryCandidateStatisticsV2Probe(
         backend=_make_bigquery_backend(settings),
         dataset=settings.bigquery_dataset,
         max_source_age=timedelta(

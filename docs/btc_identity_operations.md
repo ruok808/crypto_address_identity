@@ -143,6 +143,43 @@ cai universe candidates --campaign-id CAMPAIGN --dry-run \
   --runtime-minutes 480 --requests-per-minute 25
 ```
 
+## BTC Importance V2 Cost-Only Probe
+
+`btc_importance_v2` replaces the unconditional lifetime
+same-transaction-receipt P0 rule with a strict 90-day supported-receipt rule.
+The v2 implementation is version-isolated from the v1 SQL, one-shot executor,
+and immutable receipt.
+
+The v2 command has only two modes:
+
+```bash
+cai universe probe bigquery-candidate-statistics-v2 --dry-run \
+  --as-of-date 2026-07-24 --cutoff-height 959187
+
+cai universe probe bigquery-candidate-statistics-v2 --live-dry-run \
+  --as-of-date 2026-07-24 --cutoff-height 959187 \
+  --expected-query-sha256 REVIEWED_V2_QUERY_SHA256 \
+  --sandbox-budget-bytes 1099511627776 \
+  --reserve-bytes 250000000000
+```
+
+Offline `--dry-run` loads the fixed SQL and returns its checksum without
+constructing a BigQuery backend. `--live-dry-run` performs exactly one
+transaction-table metadata read, one current-month successful-job usage read,
+and one free BigQuery dry run. Both modes report zero provider requests and
+zero written paths.
+
+There is deliberately no v2 `execute`, `execute-once`, destination-table,
+address-export, or candidate-materialization command. A successful live dry
+run proves only that the fixed query compiles and reports an estimated byte
+cost. It does not return the v2 address counts.
+
+The v2 aggregate result contract, if separately authorized later, is pinned to
+cutoff height `959187`, standard output-address baseline `1,557,941,780`, and
+known input-only diagnostic count `3`. The three input-only subjects remain
+excluded from the output-defined population and produce a warning only when
+the exact pinned count is preserved. Any count drift blocks interpretation.
+
 A public BigQuery dataset is not automatically free.
 BigQuery free tier is account-wide. The candidate-statistics
 probe estimates remaining capacity only from successful billed query jobs

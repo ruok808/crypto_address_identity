@@ -25,10 +25,12 @@ class BigQueryQueryPlan:
     address_features_sql: str
     address_scale_sql: str
     candidate_statistics_sql: str
+    candidate_statistics_v2_sql: str
     source_checkpoint_sql: str
     address_features_sha256: str
     address_scale_sha256: str
     candidate_statistics_sha256: str
+    candidate_statistics_v2_sha256: str
     source_checkpoint_sha256: str
 
     @classmethod
@@ -52,6 +54,10 @@ class BigQueryQueryPlan:
             package_root.joinpath("sql/bigquery/candidate_statistics.sql")
             .read_text(encoding="utf-8")
         )
+        candidate_statistics_v2_template = (
+            package_root.joinpath("sql/bigquery/candidate_statistics_v2.sql")
+            .read_text(encoding="utf-8")
+        )
         transactions_table_id = f"{dataset}.transactions"
         blocks_table_id = f"{dataset}.blocks"
         replacements = {
@@ -61,6 +67,7 @@ class BigQueryQueryPlan:
         address_sql = address_template
         address_scale_sql = address_scale_template
         candidate_statistics_sql = candidate_statistics_template
+        candidate_statistics_v2_sql = candidate_statistics_v2_template
         checkpoint_sql = checkpoint_template
         for marker, identifier in replacements.items():
             address_sql = address_sql.replace(marker, identifier)
@@ -68,11 +75,15 @@ class BigQueryQueryPlan:
             candidate_statistics_sql = candidate_statistics_sql.replace(
                 marker, identifier
             )
+            candidate_statistics_v2_sql = candidate_statistics_v2_sql.replace(
+                marker, identifier
+            )
             checkpoint_sql = checkpoint_sql.replace(marker, identifier)
         if (
             "{{" in address_sql
             or "{{" in address_scale_sql
             or "{{" in candidate_statistics_sql
+            or "{{" in candidate_statistics_v2_sql
             or "{{" in checkpoint_sql
         ):
             raise InvalidBigQueryDataset("BigQuery SQL contains an unresolved marker")
@@ -83,10 +94,14 @@ class BigQueryQueryPlan:
             address_features_sql=address_sql,
             address_scale_sql=address_scale_sql,
             candidate_statistics_sql=candidate_statistics_sql,
+            candidate_statistics_v2_sql=candidate_statistics_v2_sql,
             source_checkpoint_sql=checkpoint_sql,
             address_features_sha256=cls.hash_sql(address_sql),
             address_scale_sha256=cls.hash_sql(address_scale_sql),
             candidate_statistics_sha256=cls.hash_sql(candidate_statistics_sql),
+            candidate_statistics_v2_sha256=cls.hash_sql(
+                candidate_statistics_v2_sql
+            ),
             source_checkpoint_sha256=cls.hash_sql(checkpoint_sql),
         )
 

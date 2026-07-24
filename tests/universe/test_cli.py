@@ -546,6 +546,99 @@ def test_bigquery_candidate_statistics_live_probe_requires_pinned_hash(
     }
 
 
+def test_bigquery_candidate_statistics_v2_offline_preview_is_network_free(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: (_ for _ in ()).throw(AssertionError("network boundary")),
+    )
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-candidate-statistics-v2",
+            "--dry-run",
+            "--as-of-date",
+            "2026-07-24",
+            "--cutoff-height",
+            "959187",
+        ]
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "dry_run"
+    assert output["query_kind"] == "btc_candidate_statistics_v2"
+    assert output["policy_version"] == "btc_importance_v2"
+    assert output["query_sha256"] == BigQueryQueryPlan.load(
+        "bigquery-public-data.crypto_bitcoin"
+    ).candidate_statistics_v2_sha256
+    assert output["network_requests"] == 0
+    assert output["provider_requests"] == 0
+    assert output["provider_points"] == 0
+    assert output["written_paths"] == []
+    assert not (tmp_path / "universe").exists()
+
+
+def test_bigquery_candidate_statistics_v2_live_dry_run_never_executes_or_writes(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    backend = FakeBigQueryBackend()
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: backend,
+    )
+    query_sha256 = BigQueryQueryPlan.load(
+        "bigquery-public-data.crypto_bitcoin"
+    ).candidate_statistics_v2_sha256
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-candidate-statistics-v2",
+            "--live-dry-run",
+            "--as-of-date",
+            "2026-07-24",
+            "--cutoff-height",
+            "959187",
+            "--expected-query-sha256",
+            query_sha256,
+            "--sandbox-budget-bytes",
+            "2000",
+            "--reserve-bytes",
+            "500",
+        ]
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "within_budget"
+    assert output["query_kind"] == "btc_candidate_statistics_v2"
+    assert output["policy_version"] == "btc_importance_v2"
+    assert output["dry_run_bytes"] == 900
+    assert output["within_budget"] is True
+    assert output["network_requests"] == 3
+    assert output["provider_requests"] == 0
+    assert output["provider_points"] == 0
+    assert output["written_paths"] == []
+    assert backend.calls == [
+        "table_metadata",
+        "monthly_successful_query_usage",
+        "dry_run",
+    ]
+    assert backend.query_caps == []
+    assert not (tmp_path / "universe").exists()
+
+
 def test_bigquery_candidate_statistics_execution_preview_is_offline(
     monkeypatch,
     tmp_path: Path,
