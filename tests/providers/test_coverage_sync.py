@@ -8,6 +8,7 @@ import httpx
 from crypto_address_identity.candidates import CandidateInput, CandidateService
 from crypto_address_identity.core.config import Settings
 from crypto_address_identity.coverage import (
+    CoverageEntity,
     CoverageEntitySeedInput,
     CoverageEntitySeedService,
     CoverageSyncService,
@@ -79,6 +80,33 @@ def test_coverage_parsers_dedupe_entities_and_only_keep_valid_bitcoin_prediction
 
     assert [entity.provider_entity_id for entity in entities] == ["binance", "coinbase"]
     assert predictions == (BTC_ADDRESS, SECOND_BTC_ADDRESS)
+
+
+def test_coverage_parsers_accept_live_discovery_list_shape_and_entity_aliases() -> None:
+    entities = parse_discovery_entities(
+        json.dumps(
+            [
+                {
+                    "entityId": "binance",
+                    "entityName": "Binance",
+                    "entityType": "exchange",
+                }
+            ]
+        ).encode()
+    )
+    predictions = parse_prediction_addresses(
+        json.dumps([SECOND_BTC_ADDRESS, {"address": THIRD_BTC_ADDRESS}]).encode()
+    )
+
+    assert entities == (
+        CoverageEntity(
+            provider_entity_id="binance",
+            provider_entity_name="Binance",
+            provider_entity_type="exchange",
+            rank=1,
+        ),
+    )
+    assert predictions == (SECOND_BTC_ADDRESS, THIRD_BTC_ADDRESS)
 
 
 def test_entity_seeds_are_append_only_and_deduplicated(env_mapping: dict[str, str]) -> None:

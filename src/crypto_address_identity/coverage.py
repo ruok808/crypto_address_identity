@@ -805,8 +805,8 @@ class CoverageEntity:
 
 
 def parse_discovery_entities(payload: bytes) -> tuple[CoverageEntity, ...]:
-    decoded = _json_object(payload)
-    records = _first_list(decoded, "entities", "results", "data")
+    decoded = _json_value(payload)
+    records = decoded if isinstance(decoded, list) else _first_list(decoded, "entities", "results", "data")
     if records is None:
         raise CoveragePayloadError("entity discovery has no list")
     entities = tuple(
@@ -829,8 +829,8 @@ def parse_entity_detail(payload: bytes, *, expected_entity_id: str) -> CoverageE
 
 
 def parse_prediction_addresses(payload: bytes) -> tuple[str, ...]:
-    decoded = _json_object(payload)
-    records = _first_list(decoded, "addresses", "predictions", "results", "data")
+    decoded = _json_value(payload)
+    records = decoded if isinstance(decoded, list) else _first_list(decoded, "addresses", "predictions", "results", "data")
     if records is None:
         raise CoveragePayloadError("entity predictions has no list")
     addresses: list[str] = []
@@ -848,11 +848,18 @@ def parse_prediction_addresses(payload: bytes) -> tuple[str, ...]:
     return tuple(dict.fromkeys(addresses))
 
 
-def _json_object(payload: bytes) -> dict[str, Any]:
+def _json_value(payload: bytes) -> dict[str, Any] | list[Any]:
     try:
         decoded = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CoveragePayloadError("provider body is not JSON") from exc
+    if not isinstance(decoded, (dict, list)):
+        raise CoveragePayloadError("provider body must be an object or list")
+    return decoded
+
+
+def _json_object(payload: bytes) -> dict[str, Any]:
+    decoded = _json_value(payload)
     if not isinstance(decoded, dict):
         raise CoveragePayloadError("provider body is not an object")
     return decoded
@@ -872,7 +879,7 @@ def _parse_entity_record(record: Any, *, rank: int | None) -> CoverageEntity | N
     entity_id = record.get("id") or record.get("entityId") or record.get("entity_id")
     if not isinstance(entity_id, str) or not entity_id.strip() or any(char.isspace() for char in entity_id):
         return None
-    name = record.get("name")
+    name = record.get("name") or record.get("entityName")
     entity_type = record.get("type") or record.get("entityType") or record.get("entity_type")
     return CoverageEntity(
         provider_entity_id=entity_id.strip(),
