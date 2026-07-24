@@ -1,0 +1,23 @@
+{
+  "blockchain_info": {
+    "chain": "main",
+    "blocks": 900010,
+    "headers": 900010,
+    "bestblockhash": "1010101010101010101010101010101010101010101010101010101010101010",
+    "initialblockdownload": false,
+    "verificationprogress": 1.0,
+    "pruned": false
+  },
+  "finalized_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "finalized_header": {
+    "height": 900004,
+    "time": 1784851200,
+    "confirmations": 7
+  },
+  "indexes": {
+    "txindex": {
+      "synced": true,
+      "best_block_height": 900010
+    }
+  }
+}
