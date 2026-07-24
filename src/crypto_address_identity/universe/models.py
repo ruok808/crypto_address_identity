@@ -376,6 +376,7 @@ class CandidateStatistics(UniverseModel):
     p0_unique_addresses: int = Field(ge=0)
     p1_unique_addresses: int = Field(ge=0)
     control_unique_addresses: int = Field(ge=0)
+    unique_selected_addresses: int = Field(ge=0)
     reason_memberships: int = Field(ge=0)
     reason_counts: tuple[CandidateReasonCount, ...]
     cohort_counts: dict[str, int]
@@ -384,9 +385,11 @@ class CandidateStatistics(UniverseModel):
     rate_limited_capacity: int = Field(ge=0)
     point_limited_capacity: int | None = Field(default=None, ge=0)
     first_wave_unique_addresses: int = Field(ge=0)
+    first_wave_cohort_counts: dict[str, int]
     remaining_p0_addresses: int = Field(ge=0)
     projected_minimum_minutes: int = Field(ge=0)
     provider_requests: Literal[0] = 0
     provider_points: Literal[0] = 0
     written_paths: tuple[str, ...] = ()
     blocking_reasons: tuple[str, ...] = ()
+    warning_reasons: tuple[str, ...] = ()
