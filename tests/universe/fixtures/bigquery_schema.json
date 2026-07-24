@@ -1,0 +1,39 @@
+{
+  "outputs": {
+    "table_id": "bigquery-public-data.crypto_bitcoin.outputs",
+    "partition_field": "block_timestamp",
+    "partition_type": "DAY",
+    "modified_at": "2026-07-24T00:15:00Z",
+    "fields": [
+      {"name": "block_number", "field_type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "block_hash", "field_type": "STRING", "mode": "NULLABLE"},
+      {"name": "block_timestamp", "field_type": "TIMESTAMP", "mode": "NULLABLE"},
+      {"name": "transaction_hash", "field_type": "STRING", "mode": "NULLABLE"},
+      {"name": "transaction_index", "field_type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "index", "field_type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "script_hex", "field_type": "STRING", "mode": "NULLABLE"},
+      {"name": "type", "field_type": "STRING", "mode": "NULLABLE"},
+      {"name": "addresses", "field_type": "STRING", "mode": "REPEATED"},
+      {"name": "value", "field_type": "INTEGER", "mode": "NULLABLE"}
+    ]
+  },
+  "inputs": {
+    "table_id": "bigquery-public-data.crypto_bitcoin.inputs",
+    "partition_field": "block_timestamp",
+    "partition_type": "DAY",
+    "modified_at": "2026-07-24T00:15:00Z",
+    "fields": [
+      {"name": "block_number", "field_type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "block_hash", "field_type": "STRING", "mode": "NULLABLE"},
+      {"name": "block_timestamp", "field_type": "TIMESTAMP", "mode": "NULLABLE"},
+      {"name": "transaction_hash", "field_type": "STRING", "mode": "NULLABLE"},
+      {"name": "transaction_index", "field_type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "index", "field_type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "spent_transaction_hash", "field_type": "STRING", "mode": "NULLABLE"},
+      {"name": "spent_output_index", "field_type": "INTEGER", "mode": "NULLABLE"},
+      {"name": "type", "field_type": "STRING", "mode": "NULLABLE"},
+      {"name": "addresses", "field_type": "STRING", "mode": "REPEATED"},
+      {"name": "value", "field_type": "INTEGER", "mode": "NULLABLE"}
+    ]
+  }
+}
