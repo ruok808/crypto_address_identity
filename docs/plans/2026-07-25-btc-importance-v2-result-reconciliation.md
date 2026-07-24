@@ -17,9 +17,10 @@ result. The recovery must not submit, retry, or bill another query.
 - [x] Leave the receipt unchanged when the existing result cannot be fetched.
 - [x] Add a mutually exclusive `--reconcile-existing-job` CLI mode.
 - [x] Add unit, adapter, and CLI tests proving no query submission.
-- [ ] Stop the stalled original client after code review and merge.
-- [ ] Reconcile the exact existing job and verify the final immutable receipt.
-- [ ] Decide candidate materialization policy from the accepted aggregate row.
+- [x] Stop the stalled original client after code review and merge.
+- [x] Reconcile the exact existing job and verify the final immutable receipt.
+- [x] Keep materialization blocked pending a dual-population semantics fix; the
+  returned P0, coarse-union, and edge-frontier counts pass their sizing limits.
 
 ## Fixed Boundaries
 
@@ -35,3 +36,8 @@ result. The recovery must not submit, retry, or bill another query.
 - Maximum billed bytes: `650000000000`
 - Automatic retries: `0`
 - Candidate materialization: disabled
+
+The reconciled result is intentionally `quality_blocked` because the query's
+positive-value address population does not equal the pinned output-defined
+population. See
+`docs/audits/2026-07-25-btc-importance-v2-recovery-execution.md`.
