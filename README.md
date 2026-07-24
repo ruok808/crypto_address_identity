@@ -29,6 +29,26 @@ PYTHONDONTWRITEBYTECODE=1 pytest -q -p no:cacheprovider
 python -m compileall -q src/crypto_address_identity
 ```
 
+## BTC Chain Universe Phase 1
+
+Phase 1 can plan a provider-free scan, probe BigQuery/Bitcoin Core under
+explicit read-only controls, publish one immutable chain-feature campaign, and
+report aggregate first-wave statistics.
+No BigQuery, Bitcoin Core, or 0xRouter request is made by the offline commands:
+
+```bash
+cai universe probe bigquery --dry-run --as-of-date YYYY-MM-DD
+cai universe build bigquery --dry-run --campaign-id CAMPAIGN \
+  --cutoff-height HEIGHT --cutoff-time YYYY-MM-DDTHH:MM:SSZ
+cai universe candidates --campaign-id CAMPAIGN --dry-run \
+  --runtime-minutes 480 --requests-per-minute 25
+```
+
+Every source execute mode requires a separate explicit approval and a reviewed
+positive byte cap where applicable. Aggregate candidate output contains counts
+and capacities only; it does not expose an address list, spend provider points,
+or approve an enrichment canary.
+
 See `docs/specs/2026-07-22-btc-address-identity-development-spec.md` for the
 data contract and `docs/plans/2026-07-22-btc-address-identity.md` for the
 implementation sequence.

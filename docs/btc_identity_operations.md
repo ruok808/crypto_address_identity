@@ -24,6 +24,74 @@ Dry runs validate candidate selection but do not write an ingestion run, raw
 payload, observation, evidence, claim, resolution, or export. Execute-mode
 fetches require an explicit live-fetch approval and a configured token.
 
+## BTC Chain-Universe Phase 1
+
+The chain-universe path is separate from identity-provider enrichment. It uses
+free chain facts to measure the address population and rank an eventual first
+provider wave. Offline planning and aggregate candidate statistics always
+report `provider_requests=0`, `provider_points=0`, and no written paths.
+
+Follow this exact operating sequence:
+
+1. **Offline configuration validation.** Run the BigQuery `--dry-run` command.
+   It loads the fixed SQL resources and validates identifiers without
+   constructing a Google SDK, Bitcoin RPC, or 0xRouter client.
+2. **BigQuery metadata and dry-run probe.** After a separate read-only
+   approval, use `--execute-readonly` with a positive
+   `--maximum-bytes-billed` cap. Record only schema hashes, query hashes,
+   aggregate bytes, and checkpoint facts.
+3. **Bitcoin Core read-only probe.** Run only the four allow-listed RPCs:
+   `getblockchaininfo`, `getblockhash`, `getblockheader`, and `getindexinfo`.
+   Cookie content, authorization data, and raw RPC errors never enter output.
+4. **Cutoff height/hash reconciliation.** Require the finalized BigQuery and
+   Bitcoin Core height/hash to agree. A partial or unavailable Core source
+   cannot establish a canonical complete-history cutoff.
+5. **Review dry-run bytes.** Compare the reported bytes with the exact job cap,
+   remaining account allowance, and local storage budget.
+6. **Separately approved chain read.** Run one `--execute-chain-read` command
+   with the reviewed query hash, cutoff, and positive
+   `--maximum-bytes-billed`. Do not retry a completed job.
+7. **Campaign checksum verification.** Verify the immutable manifest, Parquet
+   schemas, source probes, and every recorded artifact checksum.
+8. **Aggregate-only candidate dry-run.** Run `cai universe candidates` to
+   inspect coverage, P0/P1/control counts, overlap, capacity, and projected
+   time. It does not output addresses or open the identity SQLite database.
+9. **Stop and report.** Phase 1 stops after aggregate statistics.
+   It does not approve the 1,000-address canary.
+
+Example offline and bounded commands:
+
+```bash
+cai universe probe bigquery --dry-run --as-of-date YYYY-MM-DD
+
+cai universe probe bigquery --execute-readonly \
+  --as-of-date YYYY-MM-DD --maximum-bytes-billed REVIEWED_PROBE_CAP
+
+cai universe probe bitcoin-core --execute-readonly
+
+cai universe build bigquery --execute-chain-read \
+  --campaign-id CAMPAIGN --cutoff-height HEIGHT \
+  --cutoff-time YYYY-MM-DDTHH:MM:SSZ \
+  --maximum-bytes-billed REVIEWED_CHAIN_READ_CAP
+
+cai universe candidates --campaign-id CAMPAIGN --dry-run \
+  --runtime-minutes 480 --requests-per-minute 25
+```
+
+A public BigQuery dataset is not automatically free.
+BigQuery free tier is account-wide, and this CLI can report a job's dry-run
+bytes but cannot know the account's remaining free-tier allowance.
+A pruned Bitcoin Core node cannot prove historical script coverage; it reports
+partial capability and the workflow stops before claiming chain-universe
+completeness.
+
+The immutable campaign stores scripts and address features under
+`CAI_UNIVERSE_ROOT`. It snapshots only the minimal checksum-pinned calibration
+anchor surface from identity SQLite. Candidate statistics union anchor-only
+subjects without inventing chain balances, flow, ownership, labels, or wallet
+roles. No source probe or candidate dry-run changes the existing daily
+coverage-sync LaunchAgent.
+
 Official evidence importers are separate from provider enrichment. The OKX
 import verifies signed PoR rows from an operator-supplied public archive. The
 BITB importer retrieves only its fixed public issuer page; it stores a
@@ -284,11 +352,14 @@ identity subject; it is not a wallet or UTXO ownership verifier.
 
 1. Stop execute-mode fetches if provider schema changes or a secret appears in
    output.
-2. Use `cai audit coverage` to inspect safe outcome and evidence-tier counts.
-3. Verify raw payload object hash and resolver snapshot manifest before drawing
+2. Stop a chain-universe read on schema drift, cutoff disagreement, an exceeded
+   BigQuery cap, invalid row accounting, or checksum failure. Never retry a
+   completed source job merely because local publication failed.
+3. Use `cai audit coverage` to inspect safe outcome and evidence-tier counts.
+4. Verify raw payload object hash and resolver snapshot manifest before drawing
    a conclusion from a label.
-4. Keep unresolved conflicts as `ambiguous`; add a reviewed local override only
+5. Keep unresolved conflicts as `ambiguous`; add a reviewed local override only
    when it selects or rejects existing evidence, never by patching exports or
    consumer rows manually.
-5. Escalate a plan to promote a label into monitor or suppression behavior to a
+6. Escalate a plan to promote a label into monitor or suppression behavior to a
    separately reviewed consumer policy change.
