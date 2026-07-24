@@ -18,6 +18,7 @@ BTC_ADDRESSES = (
     "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
     "3QJmV3qfvL9SuYo34YihAf3sRCW3qSinyC",
     "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+    "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
 )
 
 

@@ -71,6 +71,8 @@ class QueryEstimate(UniverseModel):
 
 
 class BigQueryBackend(Protocol):
+    last_query_total_bytes_processed: int | None
+
     def table_metadata(self, table_id: str) -> TableMetadata: ...
 
     def dry_run(
@@ -349,6 +351,7 @@ class GoogleBigQueryBackend:
                 "google-cloud-bigquery optional dependency is missing"
             ) from exc
         self._bigquery = bigquery
+        self.last_query_total_bytes_processed: int | None = None
         try:
             self._client = bigquery.Client(project=billing_project, location=location)
         except Exception as exc:
@@ -438,10 +441,13 @@ class GoogleBigQueryBackend:
             dry_run=False,
         )
         try:
-            iterator = self._client.query(sql, job_config=job_config).result(
-                page_size=page_size
+            job = self._client.query(sql, job_config=job_config)
+            iterator = job.result(page_size=page_size)
+            for batch in iterator.to_arrow_iterable():
+                yield batch
+            self.last_query_total_bytes_processed = int(
+                job.total_bytes_processed or 0
             )
-            yield from iterator.to_arrow_iterable()
         except Exception as exc:
             raise BigQueryBoundaryError("BigQuery Arrow stream failed") from exc
 
