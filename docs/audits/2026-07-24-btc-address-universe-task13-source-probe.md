@@ -84,3 +84,42 @@ Task 13 stops at its fail-closed source and cost gates. The next approved work
 must provide an unpruned Bitcoin Core-compatible source for cutoff/sample
 reconciliation and a storage/cost plan that does not assume the full
 `1,414,991,392,737`-byte query is free.
+
+## Aggregate-Only Address Scale Extension
+
+The follow-up implementation adds a separate exact-address-count cost probe.
+It scans only `transactions.outputs.addresses`, keeps the source table
+partition and cutoff predicates, and excludes input, value, and script
+columns. Its live mode remains cost-only: table metadata plus a BigQuery dry
+run. It never executes `COUNT(DISTINCT normalized_address)` and therefore
+does not produce an address count.
+
+The operator-supplied Sandbox comparison budget is an explicit assertion
+boundary, not an execution cap or proof of remaining account allowance.
+Bitcoin Core reconciliation and durable full-universe storage remain separate
+tasks.
+
+Free live dry-run result:
+
+- Status: `within_budget`
+- Estimated bytes: `195,483,438,068`
+- Decimal size: approximately `195.48 GB`
+- Binary size: approximately `182.06 GiB`
+- Reviewed comparison budget: `1,099,511,627,776` bytes (`1 TiB`)
+- Estimated share of comparison budget: approximately `17.78%`
+- Exact-distinct query: `true`
+- Query SHA-256:
+  `3fd8371afe3fc971aa0d1995e8f2957a2aaaa48fed92847b31a9b628b31a146b`
+- Transaction schema SHA-256:
+  `7353193a75b43704d273b8bcfc4a0d4d56fc9cdc6623704bb25855a0f439dfb7`
+- Blocking reasons: `[]`
+- Provider requests and points: `0`
+- Written paths: `[]`
+- Aggregate query executed: `false`
+- Address count produced: `false`
+
+This estimate is substantially below the supplied Sandbox comparison budget,
+so a separately approved one-time aggregate execution is technically
+budget-feasible. It is not authorized by this audit. Before any execution, the
+operator must still verify the account's current month-to-date BigQuery usage
+and reserve enough free allowance for other workloads.

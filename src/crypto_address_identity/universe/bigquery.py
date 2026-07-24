@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Iterator, Mapping
 from datetime import UTC, date, datetime, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import Field, computed_field, field_validator
 
@@ -132,6 +132,194 @@ _BLOCK_FIELDS = {
     "timestamp": ("TIMESTAMP", "REQUIRED"),
     "timestamp_month": ("DATE", "REQUIRED"),
 }
+_ADDRESS_SCALE_TRANSACTION_FIELDS = {
+    "block_number": ("INTEGER", "REQUIRED"),
+    "block_timestamp": ("TIMESTAMP", "REQUIRED"),
+    "block_timestamp_month": ("DATE", "REQUIRED"),
+    "outputs": ("RECORD", "REPEATED"),
+}
+_ADDRESS_SCALE_OUTPUT_FIELDS = {
+    "addresses": ("STRING", "REPEATED"),
+}
+
+
+def _field_contracts(
+    fields: tuple[TableField, ...],
+) -> dict[str, tuple[str, str]]:
+    return {
+        field.name: (field.field_type, field.mode)
+        for field in fields
+    }
+
+
+def _contains_contract(
+    actual: Mapping[str, tuple[str, str]],
+    required: Mapping[str, tuple[str, str]],
+) -> bool:
+    return all(
+        actual.get(field_name) == contract
+        for field_name, contract in required.items()
+    )
+
+
+def _transaction_metadata_reasons(
+    *,
+    transactions: TableMetadata,
+    now: datetime,
+    max_source_age: timedelta,
+    required_fields: Mapping[str, tuple[str, str]],
+    required_nested_fields: Mapping[str, Mapping[str, tuple[str, str]]],
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    schema_matches = _contains_contract(
+        _field_contracts(transactions.fields),
+        required_fields,
+    )
+    for container_name, required in required_nested_fields.items():
+        container = next(
+            (
+                field
+                for field in transactions.fields
+                if field.name == container_name
+            ),
+            None,
+        )
+        if container is None or not _contains_contract(
+            _field_contracts(container.fields),
+            required,
+        ):
+            schema_matches = False
+    if not schema_matches:
+        reasons.append("bigquery_transactions_schema_mismatch")
+    if (
+        transactions.partition_field != "block_timestamp_month"
+        or transactions.partition_type != "DAY"
+    ):
+        reasons.append("bigquery_transactions_not_time_partitioned")
+    if now - transactions.modified_at > max_source_age:
+        reasons.append("bigquery_transactions_stale")
+    return tuple(sorted(set(reasons)))
+
+
+class BigQueryAddressScaleEstimate(UniverseModel):
+    """Cost-only result for the exact aggregate address-scale query."""
+
+    source_kind: Literal["bigquery"] = "bigquery"
+    query_kind: Literal["btc_address_scale"] = "btc_address_scale"
+    status: Literal["within_budget", "over_budget", "blocked"]
+    read_only: Literal[True] = True
+    schema_sha256: str | None = None
+    query_sha256: str
+    dry_run_bytes: int | None = Field(default=None, ge=0)
+    sandbox_budget_bytes: int = Field(gt=0)
+    within_budget: bool | None = None
+    exact_distinct: Literal[True] = True
+    blocking_reasons: tuple[str, ...] = ()
+
+
+class BigQueryAddressScaleProbe:
+    """Estimate one exact address-only aggregate without executing it."""
+
+    def __init__(
+        self,
+        *,
+        backend: BigQueryBackend,
+        dataset: str,
+        max_source_age: timedelta,
+        now: datetime | None = None,
+    ) -> None:
+        self._backend = backend
+        self._plan = BigQueryQueryPlan.load(dataset)
+        self._max_source_age = max_source_age
+        timestamp = now or datetime.now(UTC)
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("probe now must be timezone-aware")
+        self._now = timestamp.astimezone(UTC)
+
+    def run(
+        self,
+        *,
+        cutoff_height: int,
+        cutoff_time: datetime,
+        sandbox_budget_bytes: int,
+    ) -> BigQueryAddressScaleEstimate:
+        if cutoff_height < 0:
+            raise ValueError("cutoff height must be non-negative")
+        if cutoff_time.tzinfo is None or cutoff_time.utcoffset() is None:
+            raise ValueError("cutoff time must be timezone-aware")
+        if sandbox_budget_bytes <= 0:
+            raise ValueError("sandbox budget must be positive")
+
+        try:
+            transactions = self._backend.table_metadata(
+                self._plan.transactions_table_id
+            )
+        except Exception:
+            return self._blocked(
+                sandbox_budget_bytes=sandbox_budget_bytes,
+                reasons=("bigquery_metadata_unavailable",),
+            )
+
+        schema_sha256 = transactions.schema_sha256
+        reasons = _transaction_metadata_reasons(
+            transactions=transactions,
+            now=self._now,
+            max_source_age=self._max_source_age,
+            required_fields=_ADDRESS_SCALE_TRANSACTION_FIELDS,
+            required_nested_fields={
+                "outputs": _ADDRESS_SCALE_OUTPUT_FIELDS,
+            },
+        )
+        if reasons:
+            return self._blocked(
+                sandbox_budget_bytes=sandbox_budget_bytes,
+                reasons=reasons,
+                schema_sha256=schema_sha256,
+            )
+
+        try:
+            estimate = self._backend.dry_run(
+                self._plan.address_scale_sql,
+                {
+                    "cutoff_height": cutoff_height,
+                    "cutoff_time": cutoff_time.astimezone(UTC),
+                },
+                0,
+            )
+        except Exception:
+            return self._blocked(
+                sandbox_budget_bytes=sandbox_budget_bytes,
+                reasons=("bigquery_address_scale_dry_run_failed",),
+                schema_sha256=schema_sha256,
+            )
+
+        within_budget = (
+            estimate.total_bytes_processed <= sandbox_budget_bytes
+        )
+        return BigQueryAddressScaleEstimate(
+            status="within_budget" if within_budget else "over_budget",
+            schema_sha256=schema_sha256,
+            query_sha256=self._plan.address_scale_sha256,
+            dry_run_bytes=estimate.total_bytes_processed,
+            sandbox_budget_bytes=sandbox_budget_bytes,
+            within_budget=within_budget,
+        )
+
+    def _blocked(
+        self,
+        *,
+        sandbox_budget_bytes: int,
+        reasons: tuple[str, ...],
+        schema_sha256: str | None = None,
+    ) -> BigQueryAddressScaleEstimate:
+        return BigQueryAddressScaleEstimate(
+            status="blocked",
+            schema_sha256=schema_sha256,
+            query_sha256=self._plan.address_scale_sha256,
+            sandbox_budget_bytes=sandbox_budget_bytes,
+            within_budget=None,
+            blocking_reasons=reasons,
+        )
 
 
 class BigQueryProbe:
@@ -276,40 +464,20 @@ class BigQueryProbe:
     def _metadata_reasons(
         self, transactions: TableMetadata, blocks: TableMetadata
     ) -> tuple[str, ...]:
-        reasons: list[str] = []
-        transaction_fields = self._field_contracts(transactions.fields)
-        transaction_schema_matches = self._contains_contract(
-            transaction_fields, _TRANSACTION_FIELDS
-        )
-        for container_name, required in (
-            ("inputs", _TRANSACTION_INPUT_FIELDS),
-            ("outputs", _TRANSACTION_OUTPUT_FIELDS),
-        ):
-            container = next(
-                (
-                    field
-                    for field in transactions.fields
-                    if field.name == container_name
-                ),
-                None,
+        reasons = list(
+            _transaction_metadata_reasons(
+                transactions=transactions,
+                now=self._now,
+                max_source_age=self._max_source_age,
+                required_fields=_TRANSACTION_FIELDS,
+                required_nested_fields={
+                    "inputs": _TRANSACTION_INPUT_FIELDS,
+                    "outputs": _TRANSACTION_OUTPUT_FIELDS,
+                },
             )
-            if container is None or not self._contains_contract(
-                self._field_contracts(container.fields), required
-            ):
-                transaction_schema_matches = False
-        if not transaction_schema_matches:
-            reasons.append("bigquery_transactions_schema_mismatch")
-        if (
-            transactions.partition_field != "block_timestamp_month"
-            or transactions.partition_type != "DAY"
-        ):
-            reasons.append("bigquery_transactions_not_time_partitioned")
-        if self._now - transactions.modified_at > self._max_source_age:
-            reasons.append("bigquery_transactions_stale")
+        )
 
-        if not self._contains_contract(
-            self._field_contracts(blocks.fields), _BLOCK_FIELDS
-        ):
+        if not _contains_contract(_field_contracts(blocks.fields), _BLOCK_FIELDS):
             reasons.append("bigquery_blocks_schema_mismatch")
         if (
             blocks.partition_field != "timestamp_month"
@@ -319,25 +487,6 @@ class BigQueryProbe:
         if self._now - blocks.modified_at > self._max_source_age:
             reasons.append("bigquery_blocks_stale")
         return tuple(sorted(set(reasons)))
-
-    @staticmethod
-    def _field_contracts(
-        fields: tuple[TableField, ...],
-    ) -> dict[str, tuple[str, str]]:
-        return {
-            field.name: (field.field_type, field.mode)
-            for field in fields
-        }
-
-    @staticmethod
-    def _contains_contract(
-        actual: Mapping[str, tuple[str, str]],
-        required: Mapping[str, tuple[str, str]],
-    ) -> bool:
-        return all(
-            actual.get(field_name) == contract
-            for field_name, contract in required.items()
-        )
 
     @staticmethod
     def _combined_schema_hash(

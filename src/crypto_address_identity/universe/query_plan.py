@@ -23,8 +23,10 @@ class BigQueryQueryPlan:
     transactions_table_id: str
     blocks_table_id: str
     address_features_sql: str
+    address_scale_sql: str
     source_checkpoint_sql: str
     address_features_sha256: str
+    address_scale_sha256: str
     source_checkpoint_sha256: str
 
     @classmethod
@@ -40,6 +42,10 @@ class BigQueryQueryPlan:
             package_root.joinpath("sql/bigquery/source_checkpoint.sql")
             .read_text(encoding="utf-8")
         )
+        address_scale_template = (
+            package_root.joinpath("sql/bigquery/address_scale.sql")
+            .read_text(encoding="utf-8")
+        )
         transactions_table_id = f"{dataset}.transactions"
         blocks_table_id = f"{dataset}.blocks"
         replacements = {
@@ -47,19 +53,27 @@ class BigQueryQueryPlan:
             "{{BLOCKS_TABLE}}": f"`{blocks_table_id}`",
         }
         address_sql = address_template
+        address_scale_sql = address_scale_template
         checkpoint_sql = checkpoint_template
         for marker, identifier in replacements.items():
             address_sql = address_sql.replace(marker, identifier)
+            address_scale_sql = address_scale_sql.replace(marker, identifier)
             checkpoint_sql = checkpoint_sql.replace(marker, identifier)
-        if "{{" in address_sql or "{{" in checkpoint_sql:
+        if (
+            "{{" in address_sql
+            or "{{" in address_scale_sql
+            or "{{" in checkpoint_sql
+        ):
             raise InvalidBigQueryDataset("BigQuery SQL contains an unresolved marker")
         return cls(
             dataset=dataset,
             transactions_table_id=transactions_table_id,
             blocks_table_id=blocks_table_id,
             address_features_sql=address_sql,
+            address_scale_sql=address_scale_sql,
             source_checkpoint_sql=checkpoint_sql,
             address_features_sha256=cls.hash_sql(address_sql),
+            address_scale_sha256=cls.hash_sql(address_scale_sql),
             source_checkpoint_sha256=cls.hash_sql(checkpoint_sql),
         )
 

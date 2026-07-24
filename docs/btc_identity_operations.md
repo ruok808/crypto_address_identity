@@ -45,23 +45,30 @@ Follow this exact operating sequence:
    aggregate bytes, and checkpoint facts. The accepted source contract uses
    partitioned `transactions` and `blocks` tables. It rejects the flattened
    `inputs` and `outputs` compatibility views as partition authorities.
-3. **Bitcoin Core read-only probe.** Run only the four allow-listed RPCs:
+3. **Address-scale cost gate.** Use the separate
+   `bigquery-address-scale` command to estimate an exact, aggregate-only
+   `COUNT(DISTINCT address)` query. It reads only standard single-address
+   transaction outputs; it does not read values, scripts, or inputs. Its
+   `--execute-readonly` mode performs table metadata reads plus a free
+   BigQuery dry run. It does not execute the aggregate and therefore does not
+   return the address count.
+4. **Bitcoin Core read-only probe.** Run only the four allow-listed RPCs:
    `getblockchaininfo`, `getblockhash`, `getblockheader`, and `getindexinfo`.
    Cookie content, authorization data, and raw RPC errors never enter output.
-4. **Cutoff height/hash reconciliation.** Require the finalized BigQuery and
+5. **Cutoff height/hash reconciliation.** Require the finalized BigQuery and
    Bitcoin Core height/hash to agree. A partial or unavailable Core source
    cannot establish a canonical complete-history cutoff.
-5. **Review dry-run bytes.** Compare the reported bytes with the exact job cap,
+6. **Review dry-run bytes.** Compare the reported bytes with the exact job cap,
    remaining account allowance, and local storage budget.
-6. **Separately approved chain read.** Run one `--execute-chain-read` command
+7. **Separately approved chain read.** Run one `--execute-chain-read` command
    with the reviewed query hash, cutoff, and positive
    `--maximum-bytes-billed`. Do not retry a completed job.
-7. **Campaign checksum verification.** Verify the immutable manifest, Parquet
+8. **Campaign checksum verification.** Verify the immutable manifest, Parquet
    schemas, source probes, and every recorded artifact checksum.
-8. **Aggregate-only candidate dry-run.** Run `cai universe candidates` to
+9. **Aggregate-only candidate dry-run.** Run `cai universe candidates` to
    inspect coverage, P0/P1/control counts, overlap, capacity, and projected
    time. It does not output addresses or open the identity SQLite database.
-9. **Stop and report.** Phase 1 stops after aggregate statistics.
+10. **Stop and report.** Phase 1 stops after aggregate statistics.
    It does not approve the 1,000-address canary.
 
 Example offline and bounded commands:
@@ -71,6 +78,13 @@ cai universe probe bigquery --dry-run --as-of-date YYYY-MM-DD
 
 cai universe probe bigquery --execute-readonly \
   --as-of-date YYYY-MM-DD --maximum-bytes-billed REVIEWED_PROBE_CAP
+
+cai universe probe bigquery-address-scale --dry-run \
+  --as-of-date YYYY-MM-DD
+
+cai universe probe bigquery-address-scale --execute-readonly \
+  --as-of-date YYYY-MM-DD \
+  --sandbox-budget-bytes REVIEWED_SANDBOX_BUDGET
 
 cai universe probe bitcoin-core --execute-readonly
 
@@ -86,9 +100,18 @@ cai universe candidates --campaign-id CAMPAIGN --dry-run \
 A public BigQuery dataset is not automatically free.
 BigQuery free tier is account-wide, and this CLI can report a job's dry-run
 bytes but cannot know the account's remaining free-tier allowance.
+A `within_budget` address-scale result means only that the estimated bytes are
+below the operator-supplied budget. It is not proof that the account still has
+that allowance available, and it is not approval to execute the query.
 A pruned Bitcoin Core node cannot prove historical script coverage; it reports
 partial capability and the workflow stops before claiming chain-universe
 completeness.
+
+The address-scale query scans full-history outputs because every spent
+standard address first appears in an earlier transaction output. It counts
+only rows with one decoded address and therefore deliberately excludes empty,
+multi-address, and undecodable scripts. Those script classes remain part of
+the separate full-universe and Bitcoin Core storage design.
 
 If Bitcoin Core is unavailable, record `reconciliation_status=partial` and stop
 before `universe build bigquery`, even when the BigQuery source probe itself is

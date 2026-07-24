@@ -245,6 +245,105 @@ def test_bigquery_execute_readonly_requires_positive_byte_cap(
     }
 
 
+def test_bigquery_address_scale_offline_probe_is_network_free(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: (_ for _ in ()).throw(AssertionError("network boundary")),
+    )
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-address-scale",
+            "--dry-run",
+            "--as-of-date",
+            "2026-07-24",
+        ]
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "dry_run"
+    assert output["query_kind"] == "btc_address_scale"
+    assert output["network_requests"] == 0
+    assert output["provider_requests"] == 0
+    assert output["written_paths"] == []
+    assert not (tmp_path / "universe").exists()
+
+
+def test_bigquery_address_scale_live_probe_only_estimates(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    backend = FakeBigQueryBackend()
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: backend,
+    )
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-address-scale",
+            "--execute-readonly",
+            "--as-of-date",
+            "2026-07-24",
+            "--sandbox-budget-bytes",
+            "1000",
+        ]
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "within_budget"
+    assert output["query_kind"] == "btc_address_scale"
+    assert output["dry_run_bytes"] == 900
+    assert output["sandbox_budget_bytes"] == 1_000
+    assert output["within_budget"] is True
+    assert output["exact_distinct"] is True
+    assert output["provider_requests"] == 0
+    assert output["written_paths"] == []
+    assert backend.calls == ["table_metadata", "dry_run"]
+    assert backend.query_caps == []
+    assert not (tmp_path / "universe").exists()
+
+
+def test_bigquery_address_scale_live_probe_requires_positive_budget(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-address-scale",
+            "--execute-readonly",
+            "--as-of-date",
+            "2026-07-24",
+            "--sandbox-budget-bytes",
+            "0",
+        ]
+    )
+
+    assert exit_code == 2
+    assert _output(capsys) == {
+        "error_code": "invalid_input",
+        "status": "error",
+    }
+
+
 def test_bitcoin_core_execute_readonly_uses_injected_probe(
     monkeypatch,
     tmp_path: Path,

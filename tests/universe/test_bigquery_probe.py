@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from crypto_address_identity.universe.bigquery import (
+    BigQueryAddressScaleProbe,
     BigQueryProbe,
     GoogleBigQueryBackend,
     QueryEstimate,
@@ -116,6 +117,25 @@ def test_bigquery_query_plan_is_partition_bounded_and_deterministic() -> None:
     assert "block_timestamp_month" in plan.source_checkpoint_sql
     assert "LIMIT 1" in plan.source_checkpoint_sql
     assert "fixture-project" not in plan.address_features_sql
+
+
+def test_bigquery_address_scale_plan_is_exact_and_minimal() -> None:
+    plan = BigQueryQueryPlan.load("bigquery-public-data.crypto_bitcoin")
+    repeated = BigQueryQueryPlan.load("bigquery-public-data.crypto_bitcoin")
+
+    assert plan.address_scale_sha256 == repeated.address_scale_sha256
+    assert (
+        plan.address_scale_sql.count(
+            "bigquery-public-data.crypto_bitcoin.transactions"
+        )
+        == 1
+    )
+    assert "COUNT(DISTINCT normalized_address)" in plan.address_scale_sql
+    assert "UNNEST(tx.outputs)" in plan.address_scale_sql
+    assert "block_timestamp_month" in plan.address_scale_sql
+    assert "output.value" not in plan.address_scale_sql
+    assert "script_hex" not in plan.address_scale_sql
+    assert "tx.inputs" not in plan.address_scale_sql
 
 
 def test_bigquery_query_hash_changes_when_sql_changes() -> None:
@@ -331,6 +351,73 @@ def test_bigquery_probe_blocks_estimate_above_cap() -> None:
     assert result.status == "blocked"
     assert result.blocking_reasons == ("bigquery_budget_exceeded",)
     assert result.dry_run_bytes == 1_001
+
+
+def test_bigquery_address_scale_probe_estimates_within_budget() -> None:
+    backend = FakeBigQueryBackend(tables=table_metadata(), dry_run_bytes=195)
+    result = BigQueryAddressScaleProbe(
+        backend=backend,
+        dataset="bigquery-public-data.crypto_bitcoin",
+        max_source_age=timedelta(hours=48),
+        now=NOW,
+    ).run(
+        cutoff_height=900_004,
+        cutoff_time=datetime(2026, 7, 23, 22, tzinfo=UTC),
+        sandbox_budget_bytes=1_000,
+    )
+
+    assert result.status == "within_budget"
+    assert result.dry_run_bytes == 195
+    assert result.sandbox_budget_bytes == 1_000
+    assert result.within_budget is True
+    assert result.exact_distinct is True
+    assert result.blocking_reasons == ()
+    assert len(backend.dry_run_queries) == 1
+    assert backend.query_one_queries == []
+
+
+def test_bigquery_address_scale_probe_reports_over_budget_without_execution() -> None:
+    backend = FakeBigQueryBackend(tables=table_metadata(), dry_run_bytes=1_001)
+    result = BigQueryAddressScaleProbe(
+        backend=backend,
+        dataset="bigquery-public-data.crypto_bitcoin",
+        max_source_age=timedelta(hours=48),
+        now=NOW,
+    ).run(
+        cutoff_height=900_004,
+        cutoff_time=datetime(2026, 7, 23, 22, tzinfo=UTC),
+        sandbox_budget_bytes=1_000,
+    )
+
+    assert result.status == "over_budget"
+    assert result.within_budget is False
+    assert result.dry_run_bytes == 1_001
+    assert backend.query_one_queries == []
+
+
+def test_bigquery_address_scale_probe_blocks_transaction_schema_drift() -> None:
+    tables = table_metadata()
+    tables["transactions"] = _drop_nested_field(
+        tables["transactions"], "outputs", "addresses"
+    )
+    backend = FakeBigQueryBackend(tables=tables, dry_run_bytes=195)
+
+    result = BigQueryAddressScaleProbe(
+        backend=backend,
+        dataset="bigquery-public-data.crypto_bitcoin",
+        max_source_age=timedelta(hours=48),
+        now=NOW,
+    ).run(
+        cutoff_height=900_004,
+        cutoff_time=datetime(2026, 7, 23, 22, tzinfo=UTC),
+        sandbox_budget_bytes=1_000,
+    )
+
+    assert result.status == "blocked"
+    assert result.blocking_reasons == (
+        "bigquery_transactions_schema_mismatch",
+    )
+    assert backend.dry_run_queries == []
 
 
 def test_google_backend_applies_byte_cap_only_to_executing_queries() -> None:

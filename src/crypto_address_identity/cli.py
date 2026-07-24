@@ -53,6 +53,7 @@ from crypto_address_identity.storage.raw_payloads import RawPayloadStore
 from crypto_address_identity.storage.sqlite import IdentityDatabase
 from crypto_address_identity.universe.anchors import CalibrationAnchorReader
 from crypto_address_identity.universe.bigquery import (
+    BigQueryAddressScaleProbe,
     BigQueryBoundaryError,
     BigQueryCredentialsUnavailable,
     BigQueryDependencyMissing,
@@ -239,6 +240,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
     )
     universe_probe_bigquery.set_defaults(handler=_handle_universe_probe_bigquery)
+
+    universe_probe_address_scale = universe_probe_commands.add_parser(
+        "bigquery-address-scale"
+    )
+    address_scale_probe_mode = (
+        universe_probe_address_scale.add_mutually_exclusive_group(required=True)
+    )
+    address_scale_probe_mode.add_argument("--dry-run", action="store_true")
+    address_scale_probe_mode.add_argument(
+        "--execute-readonly",
+        action="store_true",
+    )
+    universe_probe_address_scale.add_argument("--as-of-date", required=True)
+    universe_probe_address_scale.add_argument(
+        "--sandbox-budget-bytes",
+        type=int,
+        default=0,
+    )
+    universe_probe_address_scale.set_defaults(
+        handler=_handle_universe_probe_bigquery_address_scale
+    )
 
     universe_probe_bitcoin = universe_probe_commands.add_parser("bitcoin-core")
     bitcoin_probe_mode = universe_probe_bitcoin.add_mutually_exclusive_group(
@@ -719,6 +741,46 @@ def _handle_universe_probe_bigquery(
         **result.model_dump(mode="json"),
         "query_sha256": plan.address_features_sha256,
         "checkpoint_query_sha256": plan.source_checkpoint_sha256,
+        "provider_requests": 0,
+        "provider_points": 0,
+        "written_paths": [],
+    }
+
+
+def _handle_universe_probe_bigquery_address_scale(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    as_of_date = _parse_date(arguments.as_of_date)
+    plan = BigQueryQueryPlan.load(settings.bigquery_dataset)
+    if arguments.dry_run:
+        return {
+            "status": "dry_run",
+            "source_kind": "bigquery",
+            "query_kind": "btc_address_scale",
+            "as_of_date": as_of_date.isoformat(),
+            "query_sha256": plan.address_scale_sha256,
+            "network_requests": 0,
+            "provider_requests": 0,
+            "provider_points": 0,
+            "written_paths": [],
+        }
+    if arguments.sandbox_budget_bytes <= 0:
+        raise CliError("positive BigQuery Sandbox budget required")
+
+    result = BigQueryAddressScaleProbe(
+        backend=_make_bigquery_backend(settings),
+        dataset=settings.bigquery_dataset,
+        max_source_age=timedelta(hours=settings.universe_max_source_age_hours),
+    ).run(
+        cutoff_height=9_223_372_036_854_775_807,
+        cutoff_time=datetime.combine(as_of_date, time.max, tzinfo=UTC),
+        sandbox_budget_bytes=arguments.sandbox_budget_bytes,
+    )
+    return {
+        **result.model_dump(mode="json"),
+        "as_of_date": as_of_date.isoformat(),
+        "network_requests": 2,
         "provider_requests": 0,
         "provider_points": 0,
         "written_paths": [],
