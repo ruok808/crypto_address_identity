@@ -3,9 +3,9 @@
 ## Boundary
 
 This service is BTC-first and local by default. It records source observations,
-evidence, claims, conflicts, and resolver snapshots. It does not run a timer,
-does not change a `quant_crypto` worker, and does not make a live provider call
-without a separate explicit approval.
+evidence, claims, conflicts, and resolver snapshots. It does not change a
+`quant_crypto` worker. Live provider work is explicitly approved and bounded;
+the optional local daily coverage-sync LaunchAgent is the only recurring task.
 
 ## Runtime Setup
 
@@ -105,6 +105,32 @@ transient provider error cannot be starved by ranking churn or repeatedly spend
 the same run's request budget.
 It never turns a failed, rate-limited, or malformed response into negative
 evidence. A `403` must be resolved with the gateway before execute mode.
+
+### Daily Local Incremental Task
+
+The optional macOS LaunchAgent runs one execute-mode coverage-sync batch each
+day at `03:20` in the local time zone. It has no `RunAtLoad` or `KeepAlive`;
+installation and validation do not make a provider request. The normal TTLs,
+shared 25/minute ceiling, 50 MiB response budget, and bounded entity/address
+limits remain the cost controls for every daily batch.
+
+It has a project-owned, token-only runtime env file at
+`~/.config/crypto_address_identity/coverage-sync.env`. The file is outside Git,
+must be owned by the local user with mode `0600`, and contains only the
+environment-only `CAI_0XROUTER_TOKEN` assignment. Do not point it at another
+project's config or runtime data.
+
+After securely provisioning that local file, install and validate the task:
+
+```bash
+ops/launchd/install_coverage_sync_launch_agent.sh
+launchctl print "gui/$(id -u)/com.ruok808.crypto-address-identity.coverage-sync"
+```
+
+The worker writes only its structured stdout/stderr to the ignored local file
+`logs/coverage_sync_worker.log`. An execute failure leaves existing raw evidence
+and resolver exports immutable; it is retried by the next daily schedule rather
+than being hidden as negative identity evidence.
 
 ## Source-Scoped Calibration
 
