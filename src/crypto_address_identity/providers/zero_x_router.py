@@ -70,9 +70,6 @@ class ZeroXRouterClient:
 
     def build_request(self, address: str, profile: ProviderProfile) -> httpx.Request:
         subject = normalize_bitcoin_address(address)
-        token = self.settings.provider_token_value()
-        if token is None:
-            raise ProviderTokenMissing("Provider token is not configured")
         path = "/chaindata/intelligence/address_enriched/" + quote(
             subject.normalized_address, safe=""
         ) + "/all"
@@ -82,15 +79,81 @@ class ZeroXRouterClient:
             "includeEntityPredictions": "true",
             "includeClusters": "false",
         }
-        return self._client.build_request(
-            "GET",
-            f"{self.settings.provider_base_url}{path}",
-            params=params,
-            headers={"X-My-Token": token, "Accept": "application/json"},
-        )
+        return self._build_authenticated_request(path, params=params)
 
     def fetch(self, address: str, profile: ProviderProfile) -> ProviderFetchResult:
         request = self.build_request(address, profile)
+        return self.fetch_request(request)
+
+    def build_btc_coverage_enrichment_request(self, address: str) -> httpx.Request:
+        """Build the smallest label-bearing BTC request supported by Chaindata.
+
+        The coverage sync intentionally avoids the multi-chain ``/all`` route,
+        cluster payloads, and per-address entity-prediction payloads.
+        """
+
+        subject = normalize_bitcoin_address(address)
+        return self._build_authenticated_request(
+            "/chaindata/intelligence/address_enriched/" + quote(subject.normalized_address, safe=""),
+            params={
+                "includeTags": "true",
+                "includeEntityPredictions": "false",
+                "includeClusters": "false",
+            },
+        )
+
+    def build_entity_request(self, entity_id: str) -> httpx.Request:
+        return self._build_authenticated_request(
+            "/chaindata/intelligence/entity/" + quote(_validate_entity_id(entity_id), safe="")
+        )
+
+    def build_entity_predictions_request(self, entity_id: str) -> httpx.Request:
+        return self._build_authenticated_request(
+            "/chaindata/intelligence/entity_predictions/"
+            + quote(_validate_entity_id(entity_id), safe="")
+        )
+
+    def build_entity_balance_changes_request(
+        self,
+        *,
+        entity_types: tuple[str, ...],
+        interval: str,
+        order_by: str,
+        order_dir: str = "desc",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> httpx.Request:
+        if not entity_types or any(not _is_safe_query_word(item) for item in entity_types):
+            raise ValueError("entity_types must contain safe non-empty values")
+        if interval not in {"7d", "14d", "30d"}:
+            raise ValueError("unsupported balance-change interval")
+        if order_by not in {
+            "balanceUsd",
+            "balanceUsdChange",
+            "balanceUsdPctChange",
+            "balanceUnit",
+            "balanceUnitChange",
+            "balanceUnitPctChange",
+        }:
+            raise ValueError("unsupported balance-change ordering")
+        if order_dir not in {"asc", "desc"}:
+            raise ValueError("unsupported balance-change direction")
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError("limit must be 1..100 and offset must be non-negative")
+        return self._build_authenticated_request(
+            "/chaindata/intelligence/entity_balance_changes",
+            params={
+                "chains": "bitcoin",
+                "entityTypes": ",".join(entity_types),
+                "interval": interval,
+                "orderBy": order_by,
+                "orderDir": order_dir,
+                "limit": str(limit),
+                "offset": str(offset),
+            },
+        )
+
+    def fetch_request(self, request: httpx.Request) -> ProviderFetchResult:
         response: httpx.Response | None = None
         for _ in range(self.settings.max_transport_retries + 1):
             try:
@@ -106,6 +169,19 @@ class ZeroXRouterClient:
         if 200 <= response.status_code < 300:
             return ProviderFetchResult(response.status_code, "success", response.content)
         return ProviderFetchResult(response.status_code, "http_error", response.content)
+
+    def _build_authenticated_request(
+        self, path: str, *, params: dict[str, str] | None = None
+    ) -> httpx.Request:
+        token = self.settings.provider_token_value()
+        if token is None:
+            raise ProviderTokenMissing("Provider token is not configured")
+        return self._client.build_request(
+            "GET",
+            f"{self.settings.provider_base_url}{path}",
+            params=params,
+            headers={"X-My-Token": token, "Accept": "application/json"},
+        )
 
 
 def parse_bitcoin_response(payload: bytes, expected_subject: BitcoinAddressSubject) -> ParsedBitcoinResponse:
@@ -216,6 +292,17 @@ def parse_bitcoin_response(payload: bytes, expected_subject: BitcoinAddressSubje
 
 def _local_provider_entity_id(provider_entity_id: str) -> str:
     return f"arkham:{provider_entity_id}"
+
+
+def _validate_entity_id(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or any(char.isspace() for char in normalized):
+        raise ValueError("entity identifier must be a compact non-empty value")
+    return normalized
+
+
+def _is_safe_query_word(value: str) -> bool:
+    return bool(value) and all(char.isalnum() or char in {"_", "-"} for char in value)
 
 
 def _schema_fingerprint(value: Any) -> str:

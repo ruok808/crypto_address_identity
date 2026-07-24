@@ -46,6 +46,26 @@ class Settings(BaseSettings):
     max_detail_candidates_per_run: int = Field(
         default=100, ge=1, validation_alias="CAI_MAX_DETAIL_CANDIDATES_PER_RUN"
     )
+    coverage_requests_per_minute: int = Field(
+        default=25, ge=3, le=30, validation_alias="CAI_CHAINDATA_COVERAGE_REQUESTS_PER_MINUTE"
+    )
+    coverage_response_bytes_budget: int = Field(
+        default=52_428_800,
+        ge=1,
+        validation_alias="CAI_CHAINDATA_COVERAGE_RESPONSE_BYTES_BUDGET",
+    )
+    coverage_address_ttl_hours: int = Field(
+        default=336, ge=1, validation_alias="CAI_CHAINDATA_COVERAGE_ADDRESS_TTL_HOURS"
+    )
+    coverage_entity_ttl_hours: int = Field(
+        default=720, ge=1, validation_alias="CAI_CHAINDATA_COVERAGE_ENTITY_TTL_HOURS"
+    )
+    coverage_max_entities_per_run: int = Field(
+        default=8, ge=1, validation_alias="CAI_CHAINDATA_COVERAGE_MAX_ENTITIES_PER_RUN"
+    )
+    coverage_max_addresses_per_run: int = Field(
+        default=100, ge=1, validation_alias="CAI_CHAINDATA_COVERAGE_MAX_ADDRESSES_PER_RUN"
+    )
 
     @field_validator("enabled_chains_value")
     @classmethod
@@ -92,4 +112,10 @@ class Settings(BaseSettings):
             "requests_per_minute": self.requests_per_minute,
             "response_bytes_budget": self.response_bytes_budget,
             "max_transport_retries": self.max_transport_retries,
+            "coverage_requests_per_minute": self.coverage_requests_per_minute,
+            "coverage_response_bytes_budget": self.coverage_response_bytes_budget,
+            "coverage_address_ttl_hours": self.coverage_address_ttl_hours,
+            "coverage_entity_ttl_hours": self.coverage_entity_ttl_hours,
+            "coverage_max_entities_per_run": self.coverage_max_entities_per_run,
+            "coverage_max_addresses_per_run": self.coverage_max_addresses_per_run,
         }

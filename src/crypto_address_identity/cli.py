@@ -27,6 +27,11 @@ from crypto_address_identity.consumers.quant_crypto_btc import (
 )
 from crypto_address_identity.consumers.btc_whale_bilateral import replay_bilateral_whale_events
 from crypto_address_identity.core.config import Settings
+from crypto_address_identity.coverage import (
+    CoverageEntitySeedInput,
+    CoverageEntitySeedService,
+    CoverageSyncService,
+)
 from crypto_address_identity.evidence import EvidenceInput, EvidenceService, VerifierRegistry
 from crypto_address_identity.exports import ResolverExporter
 from crypto_address_identity.fetch import FetchService
@@ -75,6 +80,19 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_run.add_argument("--profile", choices=("auto", "discovery"), default="auto")
     fetch_run.add_argument("--source-reference-prefix")
     fetch_run.set_defaults(handler=_handle_fetch_run)
+
+    coverage = commands.add_parser("coverage-sync")
+    coverage_commands = coverage.add_subparsers(dest="coverage_command", required=True)
+    coverage_seed = coverage_commands.add_parser("seed-entities")
+    coverage_seed.add_argument("--file", type=Path, required=True)
+    coverage_seed.add_argument("--dry-run", action="store_true")
+    coverage_seed.set_defaults(handler=_handle_coverage_seed_entities)
+    coverage_run = coverage_commands.add_parser("run")
+    coverage_run.add_argument("--dry-run", action="store_true")
+    coverage_run.add_argument("--entity-type", action="append", dest="entity_types")
+    coverage_run.add_argument("--entity-limit", type=int)
+    coverage_run.add_argument("--address-limit", type=int)
+    coverage_run.set_defaults(handler=_handle_coverage_sync_run)
 
     evidence = commands.add_parser("evidence")
     evidence_commands = evidence.add_subparsers(dest="evidence_command", required=True)
@@ -234,6 +252,43 @@ def _handle_fetch_run(arguments: argparse.Namespace) -> dict[str, Any]:
         )
         result["profile_override"] = arguments.profile
         return result
+    finally:
+        provider.close()
+
+
+def _handle_coverage_seed_entities(arguments: argparse.Namespace) -> dict[str, Any]:
+    records = [CoverageEntitySeedInput.model_validate(value) for value in _read_ndjson(arguments.file)]
+    if arguments.dry_run:
+        return {"status": "dry_run", "records": len(records)}
+    settings = Settings()
+    database = IdentityDatabase(settings.database_path)
+    database.migrate()
+    result = CoverageEntitySeedService(database).import_seeds(records)
+    return {"status": "ok", "records": len(records), **asdict(result)}
+
+
+def _handle_coverage_sync_run(arguments: argparse.Namespace) -> dict[str, Any]:
+    settings = Settings()
+    database = IdentityDatabase(settings.database_path)
+    if not arguments.dry_run:
+        database.migrate()
+        if settings.provider_token_value() is None:
+            raise ProviderTokenMissing()
+    provider = ZeroXRouterClient(settings)
+    try:
+        result = CoverageSyncService(
+            database=database,
+            settings=settings,
+            provider=provider,
+            raw_payloads=RawPayloadStore(database, settings.raw_payload_root),
+            evidence=EvidenceService(database, VerifierRegistry()),
+        ).run(
+            dry_run=arguments.dry_run,
+            entity_types=tuple(arguments.entity_types or ("exchange", "fund")),
+            entity_limit=arguments.entity_limit,
+            address_limit=arguments.address_limit,
+        )
+        return asdict(result)
     finally:
         provider.close()
 

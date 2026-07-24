@@ -51,6 +51,49 @@ The configured gateway ceiling is 30 requests/minute. The service defaults to
 per run and includes received payload bytes. HTTP 429, timeout, or malformed
 payload records an outcome; it never becomes negative identity evidence.
 
+## Coverage-Driven Chaindata Sync
+
+The currently available 0xRouter Chaindata routes do not expose a complete
+Arkham update feed. `coverage-sync` therefore targets business-relevant BTC
+coverage rather than claiming an all-Arkham export. Its bounded stages are:
+
+1. Discover large BTC-relevant entities with two Bitcoin-filtered balance-change
+   rankings.
+2. Expand only due entities through `entity/{id}` and
+   `entity_predictions/{id}`. Predictions are stored as provenance-preserving
+   memberships, not silently promoted to direct address labels.
+3. Enrich only due addresses from the existing candidate queue and the stored
+   entity-prediction fan-out. Candidate requests win priority; predicted
+   addresses fill the remaining bounded capacity. The sync uses the single-chain
+   address route and disables clusters and per-address predictions.
+
+Seed provider entity IDs through an append-only NDJSON handoff:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity coverage-sync seed-entities \
+  --file entity-seeds.ndjson --dry-run
+PYTHONPATH=src python -m crypto_address_identity coverage-sync seed-entities \
+  --file entity-seeds.ndjson
+```
+
+Run the plan first without network or writes:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity coverage-sync run --dry-run
+```
+
+Execute mode needs a healthy, explicitly approved provider token. It uses a
+single SQLite-coordinated request window at 25/minute by default, stores
+content-addressed raw responses, reports a conservative `ceil(bytes/100000)`
+points estimate, and caches entity/address observations by independent TTLs.
+Its default plan reserves two requests for discovery, two per entity for detail
+and prediction fan-out, then fills the remaining request capacity with direct
+address enrichment (eight entities leave seven direct-address requests). A
+subsequent run where entity details are still fresh spends that capacity on more
+due addresses instead.
+It never turns a failed, rate-limited, or malformed response into negative
+evidence. A `403` must be resolved with the gateway before execute mode.
+
 ## Source-Scoped Calibration
 
 An official evidence set can be queued as a bounded provider-calibration panel

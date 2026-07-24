@@ -180,3 +180,29 @@ def test_timeout_exhaustion_is_reported_as_transport_error(env_mapping: dict[str
     assert response.outcome == "transport_error"
     assert response.body == b""
     assert calls == 2
+
+
+def test_coverage_requests_stay_on_btc_routes_and_disable_unneeded_expansions(
+    env_mapping: dict[str, str]
+) -> None:
+    client = ZeroXRouterClient(
+        _settings(env_mapping, token="test-token"),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+    )
+
+    enrichment = client.build_btc_coverage_enrichment_request(BTC_ADDRESS)
+    predictions = client.build_entity_predictions_request("binance")
+    ranking = client.build_entity_balance_changes_request(
+        entity_types=("exchange", "fund"), interval="30d", order_by="balanceUsdChange"
+    )
+
+    assert enrichment.url.path.endswith(f"/address_enriched/{BTC_ADDRESS}")
+    assert not enrichment.url.path.endswith("/all")
+    assert enrichment.url.params["includeTags"] == "true"
+    assert enrichment.url.params["includeEntityPredictions"] == "false"
+    assert enrichment.url.params["includeClusters"] == "false"
+    assert predictions.url.path.endswith("/entity_predictions/binance")
+    assert ranking.url.params["chains"] == "bitcoin"
+    assert ranking.url.params["entityTypes"] == "exchange,fund"
+    assert ranking.url.params["limit"] == "100"
+    assert "test-token" not in str(enrichment.url)

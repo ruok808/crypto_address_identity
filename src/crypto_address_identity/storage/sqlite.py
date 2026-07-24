@@ -340,11 +340,127 @@ ALTER TABLE identity_resolution
     ADD COLUMN primary_entity_display TEXT;
 """
 
+_MIGRATION_005_SQL = """
+CREATE TABLE coverage_entity_seed (
+    seed_id TEXT PRIMARY KEY,
+    seed_fingerprint TEXT NOT NULL UNIQUE,
+    provider_entity_id TEXT NOT NULL,
+    priority INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 100),
+    source_reference TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX coverage_entity_seed_priority ON coverage_entity_seed(
+    priority DESC, requested_at ASC, created_at ASC
+);
+
+CREATE TABLE coverage_entity_observation (
+    entity_observation_id TEXT PRIMARY KEY,
+    entity_observation_fingerprint TEXT NOT NULL UNIQUE,
+    observation_id TEXT NOT NULL REFERENCES source_observation(observation_id),
+    provider_entity_id TEXT NOT NULL,
+    provider_entity_name TEXT,
+    provider_entity_type TEXT,
+    discovery_method TEXT NOT NULL CHECK (
+        discovery_method IN ('balance_changes', 'entity_detail', 'seed')
+    ),
+    discovery_rank INTEGER,
+    observed_at TEXT NOT NULL
+);
+
+CREATE INDEX coverage_entity_observation_lookup ON coverage_entity_observation(
+    provider_entity_id, observed_at DESC
+);
+
+CREATE TABLE coverage_entity_prediction (
+    prediction_id TEXT PRIMARY KEY,
+    prediction_fingerprint TEXT NOT NULL UNIQUE,
+    observation_id TEXT NOT NULL REFERENCES source_observation(observation_id),
+    provider_entity_id TEXT NOT NULL,
+    address_id TEXT NOT NULL REFERENCES address_subject(address_id),
+    prediction_rank INTEGER,
+    observed_at TEXT NOT NULL
+);
+
+CREATE INDEX coverage_entity_prediction_entity ON coverage_entity_prediction(
+    provider_entity_id, observed_at DESC
+);
+CREATE INDEX coverage_entity_prediction_address ON coverage_entity_prediction(
+    address_id, observed_at DESC
+);
+
+CREATE TRIGGER coverage_entity_seed_no_update
+BEFORE UPDATE ON coverage_entity_seed
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_seed is immutable');
+END;
+
+CREATE TRIGGER coverage_entity_seed_no_delete
+BEFORE DELETE ON coverage_entity_seed
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_seed is immutable');
+END;
+
+CREATE TRIGGER coverage_entity_observation_no_update
+BEFORE UPDATE ON coverage_entity_observation
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_observation is immutable');
+END;
+
+CREATE TRIGGER coverage_entity_observation_no_delete
+BEFORE DELETE ON coverage_entity_observation
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_observation is immutable');
+END;
+
+CREATE TRIGGER coverage_entity_prediction_no_update
+BEFORE UPDATE ON coverage_entity_prediction
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_prediction is immutable');
+END;
+
+CREATE TRIGGER coverage_entity_prediction_no_delete
+BEFORE DELETE ON coverage_entity_prediction
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_prediction is immutable');
+END;
+"""
+
+_MIGRATION_006_SQL = """
+CREATE TABLE coverage_address_parse_result (
+    parse_result_id TEXT PRIMARY KEY,
+    parse_result_fingerprint TEXT NOT NULL UNIQUE,
+    observation_id TEXT NOT NULL REFERENCES source_observation(observation_id),
+    address_id TEXT NOT NULL REFERENCES address_subject(address_id),
+    parse_outcome TEXT NOT NULL CHECK (parse_outcome IN ('parsed_success', 'malformed_payload')),
+    parsed_at TEXT NOT NULL
+);
+
+CREATE INDEX coverage_address_parse_result_lookup ON coverage_address_parse_result(
+    address_id, parse_outcome, parsed_at DESC
+);
+
+CREATE TRIGGER coverage_address_parse_result_no_update
+BEFORE UPDATE ON coverage_address_parse_result
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_address_parse_result is immutable');
+END;
+
+CREATE TRIGGER coverage_address_parse_result_no_delete
+BEFORE DELETE ON coverage_address_parse_result
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_address_parse_result is immutable');
+END;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration("001_initial_ledger", _MIGRATION_001_SQL),
     Migration("002_claim_review", _MIGRATION_002_SQL),
     Migration("003_append_only_identity", _MIGRATION_003_SQL),
     Migration("004_provider_default_resolution", _MIGRATION_004_SQL),
+    Migration("005_coverage_sync", _MIGRATION_005_SQL),
+    Migration("006_coverage_address_parse_result", _MIGRATION_006_SQL),
 )
 
 

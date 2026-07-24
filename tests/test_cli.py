@@ -106,6 +106,38 @@ def test_execute_fetch_without_token_returns_safe_nonzero_json(runtime_root, env
     assert "token" not in output.get("detail", "").lower()
 
 
+def test_coverage_seed_and_dry_run_return_structured_non_secret_output(
+    runtime_root, env_mapping, monkeypatch, capsys
+) -> None:
+    _configure(monkeypatch, env_mapping)
+    seeds = runtime_root / "entity-seeds.ndjson"
+    seeds.write_text(
+        json.dumps(
+            {
+                "provider_entity_id": "binance",
+                "priority": 90,
+                "source_reference": "fixture:coverage-seed",
+                "requested_at": "2026-07-24T00:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert main(["init-db"]) == 0
+    capsys.readouterr()
+
+    assert main(["coverage-sync", "seed-entities", "--file", str(seeds)]) == 0
+    seed_output = json.loads(capsys.readouterr().out)
+    assert seed_output == {"duplicate_count": 0, "inserted_count": 1, "records": 1, "status": "ok"}
+
+    assert main(["coverage-sync", "run", "--dry-run"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "dry_run"
+    assert output["entity_count"] == 1
+    assert output["address_enrichment_requests"] == 0
+    assert output["written_paths"] == []
+
+
 def test_replay_summary_only_omits_event_records_and_reports_non_interference(
     runtime_root, env_mapping, monkeypatch, capsys
 ) -> None:
