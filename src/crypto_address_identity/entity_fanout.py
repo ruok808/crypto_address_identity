@@ -829,10 +829,6 @@ class EntityRetryExhaustionService:
             row["outcome"] != "http_error" or row["http_status"] != 502
             for row in attempts
         )
-        if non_502:
-            raise ValueError(
-                "retry exhaustion campaign contains non-502 attempts"
-            )
         planned = tuple(
             entity_id for entity_id in eligible if entity_id not in already
         )

@@ -451,6 +451,95 @@ def test_retry_exhaustion_is_append_only_and_excludes_entities_from_future_fanou
     assert calls == 0
 
 
+def test_retry_exhaustion_selects_only_502_rows_from_mixed_campaign(
+    env_mapping: dict[str, str],
+) -> None:
+    settings = _settings(env_mapping)
+    database = IdentityDatabase(settings.database_path)
+    database.migrate()
+    campaign = "fixture-mixed-fanout"
+    with database.write_transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO ingestion_run (
+                ingestion_run_id, mode, status, started_at, completed_at,
+                request_limit, response_bytes_budget
+            ) VALUES (
+                'mixed-run', 'execute', 'partial',
+                '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z',
+                25, 1048576
+            )
+            """
+        )
+        attempts = (
+            ("mixed-success", "entity-success", 200, "success"),
+            ("mixed-502-a", "entity-502-a", 502, "http_error"),
+            ("mixed-502-b", "entity-502-b", 502, "http_error"),
+        )
+        for observation_id, entity_id, http_status, outcome in attempts:
+            connection.execute(
+                """
+                INSERT INTO source_observation (
+                    observation_id, source_id, source_version, source_kind,
+                    endpoint_template, query_profile, requested_at,
+                    completed_at, http_status, outcome, response_bytes,
+                    chain_key, ingestion_run_id
+                ) VALUES (
+                    ?, '0xrouter', 'fixture', 'provider',
+                    '/chaindata/intelligence/entity_predictions/{entity}',
+                    ?, '2026-07-25T00:00:00Z',
+                    '2026-07-25T00:00:00Z', ?, ?, 100,
+                    'bitcoin', 'mixed-run'
+                )
+                """,
+                (
+                    observation_id,
+                    f"btc_v2s_entity_fanout:{campaign}",
+                    http_status,
+                    outcome,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO coverage_entity_prediction_attempt (
+                    prediction_attempt_id, prediction_attempt_fingerprint,
+                    observation_id, provider_entity_id, outcome, attempted_at
+                ) VALUES (?, ?, ?, ?, ?, '2026-07-25T00:00:00Z')
+                """,
+                (
+                    f"attempt-{observation_id}",
+                    f"fingerprint-{observation_id}",
+                    observation_id,
+                    entity_id,
+                    outcome,
+                ),
+            )
+
+    result = EntityRetryExhaustionService(database).finalize(
+        campaign_id=campaign,
+        reason="transient_retry_exhausted",
+        dry_run=False,
+        exhausted_at=datetime(2026, 7, 25, tzinfo=UTC),
+    )
+
+    assert result.campaign_attempts == 3
+    assert result.eligible_502_entities == 2
+    assert result.non_502_attempts == 1
+    assert result.inserted_entities == 2
+    with database.read_connection() as connection:
+        exhausted = connection.execute(
+            """
+            SELECT provider_entity_id
+            FROM coverage_entity_retry_exhaustion
+            ORDER BY provider_entity_id
+            """
+        ).fetchall()
+    assert [row["provider_entity_id"] for row in exhausted] == [
+        "entity-502-a",
+        "entity-502-b",
+    ]
+
+
 def test_coverage_snapshot_uses_deterministic_state_precedence(
     env_mapping: dict[str, str], runtime_root: Path
 ) -> None:

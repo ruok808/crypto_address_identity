@@ -601,11 +601,12 @@ PYTHONPATH=src python -m crypto_address_identity coverage-sync \
   --dry-run
 ```
 
-Review the aggregate count, then repeat without `--dry-run`. The command accepts
-only campaigns whose recorded attempts are all HTTP 502. Exhausted entity IDs
-are excluded from both the bootstrap fanout and the regular coverage-sync entity
-queue. Reopening one requires a new reviewed policy; changing or deleting the
-append-only rows is forbidden.
+Review the aggregate count, then repeat without `--dry-run`. The command selects
+only attempts recorded as HTTP 502; successful or differently failed entities
+in a mixed campaign are reported as `non_502_attempts` and are never frozen.
+Exhausted entity IDs are excluded from both the bootstrap fanout and the regular
+coverage-sync entity queue. Reopening one requires a new reviewed policy;
+changing or deleting the append-only rows is forbidden.
 
 Build the direct-address queue from one exact coverage snapshot and the original
 V2-S candidate campaign:
