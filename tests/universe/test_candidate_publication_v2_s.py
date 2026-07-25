@@ -327,6 +327,37 @@ def test_publication_locally_bounds_large_storage_api_batches(
     assert outcome.candidate_rows == 4
 
 
+def test_publication_canonicalizes_scaled_integral_satoshi_decimals(
+    tmp_path: Path,
+) -> None:
+    receipt_sha256 = _execution_receipt(tmp_path / "execution.json")
+    request = _request(tmp_path, receipt_sha256=receipt_sha256)
+    rows = _rows()
+    rows[0]["current_utxo_sats"] = Decimal(
+        "10000000000.00000000000000000000000000000000000000"
+    )
+    publisher = StrictV2SCandidateArtifactPublisher(
+        backend=FakeCandidateTableBackend(rows),
+        expected_counts=CandidateArtifactExpectedCounts(
+            total=4,
+            p0=1,
+            p1=1,
+            edge=1,
+            coarse_other=1,
+        ),
+    )
+
+    outcome = publisher.run(request)
+
+    parquet_path = next(
+        Path(outcome.campaign_root).glob(
+            "candidates/tier=p0/bucket=*/*.parquet"
+        )
+    )
+    exported = pq.read_table(parquet_path).to_pylist()
+    assert exported[0]["current_utxo_sats"] == Decimal(10_000_000_000)
+
+
 def test_publication_blocks_receipt_change_after_initial_validation(
     tmp_path: Path,
 ) -> None:

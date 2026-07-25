@@ -246,7 +246,10 @@ class StrictV2SCandidateRow(UniverseModel):
         return self
 
     def arrow_row(self) -> dict[str, object]:
-        return self.model_dump(mode="python")
+        values = self.model_dump(mode="python")
+        for field_name in _SATS_FIELDS:
+            values[field_name] = Decimal(int(values[field_name]))
+        return values
 
 
 class StrictV2SCandidatePublicationRequest(UniverseModel):
