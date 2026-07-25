@@ -343,6 +343,78 @@ def test_address_campaign_dry_run_writes_nothing_and_execute_is_once_per_address
         )
 
 
+def test_address_campaign_rate_limit_uses_request_start_spacing(
+    env_mapping: dict[str, str],
+    runtime_root: Path,
+) -> None:
+    candidate_root, coverage_root = _write_inputs(runtime_root)
+    queue = BtcV2SAddressQueueBuilder().build(
+        candidate_campaign_root=candidate_root,
+        coverage_snapshot_root=coverage_root,
+        output_root=runtime_root / "queues",
+        built_at=datetime(2026, 7, 25, tzinfo=UTC),
+    )
+    settings = _settings(env_mapping)
+    database = IdentityDatabase(settings.database_path)
+    database.migrate()
+    monotonic_now = 0.0
+    request_starts: list[float] = []
+    sleep_calls: list[float] = []
+
+    def monotonic() -> float:
+        return monotonic_now
+
+    def sleeper(seconds: float) -> None:
+        nonlocal monotonic_now
+        sleep_calls.append(seconds)
+        monotonic_now += seconds
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal monotonic_now
+        request_starts.append(monotonic_now)
+        monotonic_now += 0.8
+        address = request.url.path.split("/")[-2]
+        return httpx.Response(
+            200,
+            json={
+                "bitcoin": {
+                    "address": address,
+                    "chain": "bitcoin",
+                }
+            },
+        )
+
+    provider = ZeroXRouterClient(
+        settings, transport=httpx.MockTransport(handler)
+    )
+    try:
+        result = BtcV2SAddressEnrichmentService(
+            database=database,
+            settings=settings,
+            provider=provider,
+            raw_payloads=RawPayloadStore(
+                database, settings.raw_payload_root
+            ),
+            evidence=EvidenceService(database, VerifierRegistry()),
+            sleeper=sleeper,
+            monotonic=monotonic,
+        ).run(
+            queue_root=queue.manifest_path.parent,
+            campaign_id="fixture-start-spacing",
+            cohort="urgent",
+            request_limit=10,
+            campaign_point_limit=20,
+            dry_run=False,
+            now=datetime(2026, 7, 25, tzinfo=UTC),
+        )
+    finally:
+        provider.close()
+
+    assert result.requests == 2
+    assert request_starts == pytest.approx([0.0, 2.4])
+    assert sleep_calls == pytest.approx([1.6])
+
+
 def test_campaign_point_limit_bounds_planned_addresses(
     env_mapping: dict[str, str],
     runtime_root: Path,

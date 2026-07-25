@@ -644,9 +644,10 @@ PYTHONPATH=src python -m crypto_address_identity coverage-sync \
 Securely load the token and repeat without `--dry-run` only after reviewing the
 aggregate plan. The runner uses the validated
 `address_enriched/{address}/all` profile, zero transport retries, the shared
-25/minute ceiling, the 50 MiB run budget, a three-failure circuit breaker, and
-content-addressed raw storage. It reports counts and checksums, never addresses
-or provider payloads.
+25/minute start-to-start ceiling, the 50 MiB run budget, a three-failure
+circuit breaker, and content-addressed raw storage. Provider response time is
+counted inside the spacing interval rather than added after it. It reports
+counts and checksums, never addresses or provider payloads.
 
 Successful responses append Tier C evidence through the existing evidence
 service. Newly observed provider entity IDs become deduplicated entity seeds.

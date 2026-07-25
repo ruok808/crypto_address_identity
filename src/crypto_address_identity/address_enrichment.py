@@ -457,6 +457,7 @@ class BtcV2SAddressEnrichmentService:
         raw_payloads: RawPayloadStore,
         evidence: EvidenceService,
         sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.database = database
@@ -465,6 +466,7 @@ class BtcV2SAddressEnrichmentService:
         self.raw_payloads = raw_payloads
         self.evidence = evidence
         self.sleeper = sleeper
+        self.monotonic = monotonic
         self.clock = clock or (lambda: datetime.now(UTC))
         self.quota = QuotaManager(database)
 
@@ -613,10 +615,15 @@ class BtcV2SAddressEnrichmentService:
         blocked = False
         discovered_entities: set[str] = set()
         existing_entities = self._known_entity_ids()
+        previous_request_started: float | None = None
 
         for index, row in enumerate(planned):
-            if index:
-                self.sleeper(interval)
+            if previous_request_started is not None:
+                elapsed = self.monotonic() - previous_request_started
+                remaining = interval - elapsed
+                if remaining > 0:
+                    self.sleeper(remaining)
+            previous_request_started = self.monotonic()
             observed_at = (
                 started_at + timedelta(seconds=interval * index)
                 if now is not None
