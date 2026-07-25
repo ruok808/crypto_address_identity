@@ -471,11 +471,14 @@ coverage rather than claiming an all-Arkham export. Its bounded stages are:
 2. Expand only due entities through `entity/{id}` and
    `entity_predictions/{id}`. Predictions are stored as provenance-preserving
    memberships, not silently promoted to direct address labels.
-3. Enrich only due addresses from the existing candidate queue and the stored
-   entity-prediction fan-out. Candidate requests win priority; predicted
-   addresses fill the remaining bounded capacity. It uses the live-validated
-   BTC `address_enriched/{address}/all` profile with tags, predictions, and
-   clusters enabled; response budgets and TTLs bound the richer payload.
+3. Enrich only due addresses from the explicit candidate queue or active
+   conflicts. A prediction-only address with explicit entity membership is
+   identity-covered and does not consume an `address_enriched` request.
+   Address-level enrichment remains available for conflicts, wallet-role or tag
+   requirements, and addresses with no explicit member relationship. It uses
+   the live-validated BTC `address_enriched/{address}/all` profile with tags,
+   predictions, and clusters enabled; response budgets and TTLs bound the
+   richer payload.
 
 Seed provider entity IDs through an append-only NDJSON handoff:
 
@@ -515,9 +518,81 @@ the same run's request budget.
 It never turns a failed, rate-limited, or malformed response into negative
 evidence. A `403` must be resolved with the gateway before execute mode.
 
+### V2-S Entity Fanout Bootstrap
+
+The V2-S bootstrap is a bounded, one-time entity-membership expansion. It reads
+the checksum-verified Arkham canary, merges its provider entity IDs with the
+local entity IDs, and deduplicates exactly. The cost probe and later batches use
+only `entity_predictions/{entity}`. They never call discovery, entity detail,
+or address enrichment, and each entity has at most one transport attempt in the
+campaign. A campaign attempt is recorded even when the provider returns an
+error, preventing silent retries and repeated point spend.
+
+The route is not a complete entity-member export: the gateway contract exposes
+no pagination parameters and returns at most about 1,000 addresses, commonly
+ordered by USD balance across chains. Coverage is asserted only for explicit
+BTC addresses present in the response. No unreturned address inherits entity
+membership by inference.
+
+Plan the first ten unique entities without network or database writes:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity coverage-sync entity-fanout \
+  --canary-root data/canaries/btc-v2s-arkham-canary-v1 \
+  --campaign-id btc-v2s-bootstrap-959187 \
+  --request-limit 10 \
+  --dry-run
+```
+
+After reviewing the plan and securely loading the token, run the ten-entity
+probe. Later invocations automatically exclude terminal cached entities and all
+entities already attempted by this campaign. `--request-limit` bounds entities
+in the run, not requests per minute; even a larger bootstrap batch remains
+paced by the shared 25/minute rolling ceiling:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity coverage-sync entity-fanout \
+  --canary-root data/canaries/btc-v2s-arkham-canary-v1 \
+  --campaign-id btc-v2s-bootstrap-959187 \
+  --request-limit 10
+```
+
+After a healthy probe, use `--request-limit 500` to consume the remaining
+deduplicated bootstrap entities in one paced run. Authentication, payment,
+rate-limit responses, three consecutive provider failures, or the response byte
+budget trip a fail-closed circuit breaker. No failed entity is automatically
+retried inside the campaign.
+
+Build the local intersection only after the entity fanout is complete:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity coverage-sync build-v2s-state \
+  --candidate-campaign-root data/universe/campaigns/btc-v2s-bootstrap-959187 \
+  --canary-root data/canaries/btc-v2s-arkham-canary-v1 \
+  --output-root data/coverage/btc-v2s-bootstrap-959187
+```
+
+The checksum-pinned snapshot contains every V2-S candidate exactly once and
+uses this precedence:
+
+- `direct_enriched`: a validated address-level provider response exists.
+- `needs_direct_enrichment`: an active conflict or explicit address-level
+  request exists, even when entity membership is present.
+- `entity_membership_covered`: one or more explicit provider entity memberships
+  exist and no stronger direct requirement applies.
+- `local_evidence_covered`: valid local entity-control evidence exists.
+- `needs_direct_enrichment`: no explicit membership or usable local evidence
+  exists.
+
+The snapshot stores provider entity IDs only in the ignored local artifact.
+CLI and audit output expose aggregate counts, checksums, and paths rather than
+address or entity lists.
+
 ### Daily Local Incremental Task
 
-The optional macOS LaunchAgent runs one execute-mode coverage-sync batch each
+The optional macOS LaunchAgent is for low-frequency maintenance after bootstrap;
+it is not the mechanism used to enumerate the V2-S universe. It runs one
+execute-mode coverage-sync batch each
 day at `03:20` in the local time zone. It has no `RunAtLoad` or `KeepAlive`;
 installation and validation do not make a provider request. The normal TTLs,
 shared 25/minute ceiling, 50 MiB response budget, and bounded entity/address

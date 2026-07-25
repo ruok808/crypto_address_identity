@@ -32,6 +32,11 @@ from crypto_address_identity.coverage import (
     CoverageEntitySeedService,
     CoverageSyncService,
 )
+from crypto_address_identity.entity_fanout import (
+    BtcEntityFanoutService,
+    BtcV2SCoverageSnapshotBuilder,
+    CanaryEntitySeedReader,
+)
 from crypto_address_identity.evidence import EvidenceInput, EvidenceService, VerifierRegistry
 from crypto_address_identity.exports import ResolverExporter
 from crypto_address_identity.fetch import FetchService
@@ -170,6 +175,22 @@ def build_parser() -> argparse.ArgumentParser:
     coverage_run.add_argument("--entity-limit", type=int)
     coverage_run.add_argument("--address-limit", type=int)
     coverage_run.set_defaults(handler=_handle_coverage_sync_run)
+    coverage_fanout = coverage_commands.add_parser("entity-fanout")
+    coverage_fanout.add_argument("--canary-root", type=Path, required=True)
+    coverage_fanout.add_argument(
+        "--campaign-id", default="btc-v2s-bootstrap-959187"
+    )
+    coverage_fanout.add_argument("--request-limit", type=int, default=10)
+    coverage_fanout.add_argument("--exclude-local-entities", action="store_true")
+    coverage_fanout.add_argument("--dry-run", action="store_true")
+    coverage_fanout.set_defaults(handler=_handle_coverage_entity_fanout)
+    coverage_state = coverage_commands.add_parser("build-v2s-state")
+    coverage_state.add_argument(
+        "--candidate-campaign-root", type=Path, required=True
+    )
+    coverage_state.add_argument("--canary-root", type=Path, required=True)
+    coverage_state.add_argument("--output-root", type=Path, required=True)
+    coverage_state.set_defaults(handler=_handle_coverage_build_v2s_state)
 
     evidence = commands.add_parser("evidence")
     evidence_commands = evidence.add_subparsers(dest="evidence_command", required=True)
@@ -927,6 +948,80 @@ def _handle_coverage_sync_run(arguments: argparse.Namespace) -> dict[str, Any]:
         return asdict(result)
     finally:
         provider.close()
+
+
+def _handle_coverage_entity_fanout(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    database = IdentityDatabase(settings.database_path)
+    canary = CanaryEntitySeedReader(arguments.canary_root).read()
+    seed_result = None
+    if not arguments.dry_run:
+        if settings.provider_token_value() is None:
+            raise ProviderTokenMissing()
+        database.migrate()
+        seed_result = CoverageEntitySeedService(database).import_seeds(
+            [
+                CoverageEntitySeedInput(
+                    provider_entity_id=entity_id,
+                    priority=min(100, 80 + min(frequency, 20)),
+                    source_reference=canary.source_reference,
+                    requested_at=canary.requested_at,
+                )
+                for entity_id, frequency in canary.entity_frequencies
+            ]
+        )
+    provider = ZeroXRouterClient(settings)
+    try:
+        fanout = BtcEntityFanoutService(
+            database=database,
+            settings=settings,
+            provider=provider,
+            raw_payloads=RawPayloadStore(
+                database, settings.raw_payload_root
+            ),
+        ).run(
+            entity_ids=canary.entity_ids,
+            include_local_entities=not arguments.exclude_local_entities,
+            dry_run=arguments.dry_run,
+            request_limit=arguments.request_limit,
+            campaign_id=arguments.campaign_id,
+        )
+    finally:
+        provider.close()
+    result = asdict(fanout)
+    result.update(
+        {
+            "canary_id": canary.canary_id,
+            "canary_unique_entities": len(canary.entity_ids),
+            "canary_entity_labeled_addresses": (
+                canary.entity_labeled_addresses
+            ),
+            "canary_verified_payloads": canary.verified_payloads,
+            "seed_inserted_count": (
+                seed_result.inserted_count if seed_result else 0
+            ),
+            "seed_duplicate_count": (
+                seed_result.duplicate_count if seed_result else 0
+            ),
+        }
+    )
+    return result
+
+
+def _handle_coverage_build_v2s_state(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    result = BtcV2SCoverageSnapshotBuilder(
+        IdentityDatabase(settings.database_path)
+    ).build(
+        campaign_root=arguments.candidate_campaign_root,
+        canary_root=arguments.canary_root,
+        output_root=arguments.output_root,
+    )
+    return asdict(result)
 
 
 def _handle_evidence_import(arguments: argparse.Namespace) -> dict[str, Any]:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 from pathlib import Path
 
@@ -60,6 +62,44 @@ def _evidence_file(path: Path) -> Path:
         encoding="utf-8",
     )
     return file_path
+
+
+def _entity_canary(path: Path) -> Path:
+    canary = path / "entity-canary"
+    raw_root = canary / "raw"
+    raw_root.mkdir(parents=True)
+    body = json.dumps(
+        {
+            "bitcoin": {
+                "address": BTC_ADDRESS,
+                "arkhamEntity": {"id": "binance", "name": "Binance"},
+            }
+        },
+        sort_keys=True,
+    ).encode()
+    payload_sha256 = hashlib.sha256(body).hexdigest()
+    relative_path = (
+        Path("sha256") / payload_sha256[:2] / f"{payload_sha256}.json.gz"
+    )
+    destination = raw_root / relative_path
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(gzip.compress(body, mtime=0))
+    (canary / "request_ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "sequence": 1,
+                "payload_sha256": payload_sha256,
+                "raw_relative_path": str(relative_path),
+                "outcome": "success",
+                "parse_outcome": "parsed_success",
+                "completed_at": "2026-07-25T00:00:00Z",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return canary
 
 
 def test_init_db_and_dry_run_candidate_import_return_structured_json(
@@ -135,6 +175,39 @@ def test_coverage_seed_and_dry_run_return_structured_non_secret_output(
     assert output["status"] == "dry_run"
     assert output["entity_count"] == 1
     assert output["address_enrichment_requests"] == 0
+    assert output["written_paths"] == []
+
+
+def test_entity_fanout_dry_run_reads_verified_canary_without_token_or_writes(
+    runtime_root, env_mapping, monkeypatch, capsys
+) -> None:
+    _configure(monkeypatch, env_mapping)
+    canary = _entity_canary(runtime_root)
+    assert main(["init-db"]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "coverage-sync",
+                "entity-fanout",
+                "--canary-root",
+                str(canary),
+                "--request-limit",
+                "10",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["status"] == "dry_run"
+    assert output["canary_unique_entities"] == 1
+    assert output["canary_verified_payloads"] == 1
+    assert output["merged_unique_entities"] == 1
+    assert output["planned_entities"] == 1
+    assert output["requests"] == 0
     assert output["written_paths"] == []
 
 

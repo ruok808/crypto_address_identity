@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 
 from crypto_address_identity.candidates import CandidateInput, CandidateService
+from crypto_address_identity.chains.bitcoin import normalize_bitcoin_address
 from crypto_address_identity.core.config import Settings
 from crypto_address_identity.coverage import (
     CoverageEntity,
@@ -233,7 +234,7 @@ def test_coverage_execute_fans_out_entities_without_repeating_fresh_detail_or_ad
     assert first.entity_detail_requests == 1
     assert first.prediction_requests == 1
     assert first.prediction_address_count == 2
-    assert first.address_enrichment_requests == 3
+    assert first.address_enrichment_requests == 1
     assert first.address_evidence_count == 1
     assert first.estimated_points >= 1
     assert second.entity_detail_requests == 0
@@ -242,8 +243,65 @@ def test_coverage_execute_fans_out_entities_without_repeating_fresh_detail_or_ad
     with database.read_connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM coverage_entity_prediction").fetchone()[0] == 2
         assert connection.execute("SELECT COUNT(*) FROM identity_evidence").fetchone()[0] == 1
-        assert connection.execute("SELECT COUNT(*) FROM raw_payload_object").fetchone()[0] == 6
+        assert connection.execute("SELECT COUNT(*) FROM raw_payload_object").fetchone()[0] == 4
     assert calls.count("/chaindata/intelligence/entity_predictions/binance") == 1
+    assert (
+        calls.count(
+            f"/chaindata/intelligence/address_enriched/{SECOND_BTC_ADDRESS}/all"
+        )
+        == 0
+    )
+    assert (
+        calls.count(
+            f"/chaindata/intelligence/address_enriched/{THIRD_BTC_ADDRESS}/all"
+        )
+        == 0
+    )
+
+
+def test_active_conflict_remains_due_for_direct_enrichment(
+    env_mapping: dict[str, str],
+) -> None:
+    database, service = _service(
+        env_mapping, lambda request: httpx.Response(200, json={})
+    )
+    subject = normalize_bitcoin_address(SECOND_BTC_ADDRESS)
+    with database.write_transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO address_subject (
+                address_id, chain_key, normalized_address, display_address,
+                address_type, first_seen_at
+            ) VALUES (?, ?, ?, ?, ?, '2026-07-24T00:00:00Z')
+            """,
+            (
+                subject.address_id,
+                subject.chain_key,
+                subject.normalized_address,
+                subject.display_address,
+                subject.address_type,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO conflict_set (
+                conflict_set_id, address_id, assertion_type, created_at,
+                resolved_at, status
+            ) VALUES (
+                'conflict', ?, 'entity_control',
+                '2026-07-24T00:00:00Z', NULL, 'active'
+            )
+            """,
+            (subject.address_id,),
+        )
+
+    selected = service._select_due_addresses(
+        limit=5, now=datetime(2026, 7, 24, tzinfo=UTC)
+    )
+
+    assert len(selected) == 1
+    assert selected[0].normalized_address == SECOND_BTC_ADDRESS
+    assert selected[0].source_kind == "active_conflict"
 
 
 def test_no_bitcoin_prediction_result_is_cached_without_marking_the_run_malformed(
@@ -374,9 +432,9 @@ def test_malformed_address_enrichment_does_not_enter_the_ttl_cache(env_mapping: 
 
     assert first.status == "partial"
     assert first.outcome_counts["malformed_payload"] == 1
-    # The malformed candidate is retried, and the entity-prediction address is
-    # separately attempted because neither has a successful parse cache entry.
-    assert second.address_enrichment_requests == 2
+    # The malformed explicit candidate is retried. The prediction-only member
+    # is identity-covered and does not consume an address-enrichment request.
+    assert second.address_enrichment_requests == 1
     with database.read_connection() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM coverage_address_parse_result WHERE parse_outcome = 'malformed_payload'"

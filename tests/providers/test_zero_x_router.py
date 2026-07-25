@@ -182,6 +182,31 @@ def test_timeout_exhaustion_is_reported_as_transport_error(env_mapping: dict[str
     assert calls == 2
 
 
+def test_one_shot_request_never_retries_transport_errors(
+    env_mapping: dict[str, str],
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("fixture timeout", request=request)
+
+    client = ZeroXRouterClient(
+        _settings(env_mapping, token="test-token"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = client.fetch_request_once(
+        client.build_entity_predictions_request("binance")
+    )
+
+    assert response.http_status is None
+    assert response.outcome == "transport_error"
+    assert response.body == b""
+    assert calls == 1
+
+
 def test_coverage_requests_use_the_live_validated_btc_all_profile(
     env_mapping: dict[str, str]
 ) -> None:

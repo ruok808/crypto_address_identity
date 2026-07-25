@@ -549,72 +549,62 @@ class CoverageSyncService:
     def _select_due_addresses(self, *, limit: int, now: datetime) -> tuple[CoverageAddressTarget, ...]:
         cutoff = _utc_string(now - timedelta(hours=self.settings.coverage_address_ttl_hours))
         with self.database.read_connection() as connection:
-            candidate_rows = connection.execute(
+            rows = connection.execute(
                 """
-                SELECT cr.address_id, address.normalized_address,
-                       MAX(cr.priority) AS priority
-                FROM candidate_request AS cr
-                JOIN address_subject AS address ON address.address_id = cr.address_id
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM coverage_address_parse_result AS parse_result
-                    WHERE parse_result.address_id = cr.address_id
-                      AND parse_result.parse_outcome = 'parsed_success'
-                      AND parse_result.parsed_at > ?
+                WITH due AS (
+                    SELECT cr.address_id, MAX(cr.priority) AS priority,
+                           MIN(cr.requested_at) AS due_at, 0 AS active_conflict
+                    FROM candidate_request AS cr
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM coverage_address_parse_result AS parse_result
+                        WHERE parse_result.address_id = cr.address_id
+                          AND parse_result.parse_outcome = 'parsed_success'
+                          AND parse_result.parsed_at > ?
+                    )
+                    GROUP BY cr.address_id
+
+                    UNION ALL
+
+                    SELECT conflict.address_id, 100 AS priority,
+                           MIN(conflict.created_at) AS due_at,
+                           1 AS active_conflict
+                    FROM conflict_set AS conflict
+                    WHERE conflict.status = 'active'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM coverage_address_parse_result AS parse_result
+                          WHERE parse_result.address_id = conflict.address_id
+                            AND parse_result.parse_outcome = 'parsed_success'
+                            AND parse_result.parsed_at > ?
+                      )
+                    GROUP BY conflict.address_id
                 )
-                GROUP BY cr.address_id, address.normalized_address
-                ORDER BY priority DESC, MIN(cr.requested_at) ASC, cr.address_id ASC
+                SELECT due.address_id, address.normalized_address,
+                       MAX(due.priority) AS priority,
+                       CASE WHEN MAX(due.active_conflict) = 1
+                            THEN 'active_conflict'
+                            ELSE 'candidate_request'
+                       END AS source_kind,
+                       MIN(due.due_at) AS due_at
+                FROM due
+                JOIN address_subject AS address
+                  ON address.address_id = due.address_id
+                GROUP BY due.address_id, address.normalized_address
+                ORDER BY priority DESC, due_at ASC, due.address_id ASC
                 LIMIT ?
                 """,
-                (cutoff, limit),
+                (cutoff, cutoff, limit),
             ).fetchall()
-            prediction_rows = connection.execute(
-                """
-                SELECT prediction.address_id, address.normalized_address,
-                       MIN(prediction.prediction_rank) AS prediction_rank
-                FROM coverage_entity_prediction AS prediction
-                JOIN address_subject AS address ON address.address_id = prediction.address_id
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM coverage_address_parse_result AS parse_result
-                    WHERE parse_result.address_id = prediction.address_id
-                      AND parse_result.parse_outcome = 'parsed_success'
-                      AND parse_result.parsed_at > ?
-                )
-                GROUP BY prediction.address_id, address.normalized_address
-                ORDER BY prediction_rank ASC, MIN(prediction.observed_at) ASC,
-                         prediction.address_id ASC
-                LIMIT ?
-                """,
-                (cutoff, limit),
-            ).fetchall()
-        selected: list[CoverageAddressTarget] = []
-        seen: set[str] = set()
-        for row in candidate_rows:
-            if row["address_id"] in seen:
-                continue
-            seen.add(row["address_id"])
-            selected.append(
-                CoverageAddressTarget(
-                    address_id=row["address_id"],
-                    normalized_address=row["normalized_address"],
-                    priority=row["priority"],
-                    source_kind="candidate_request",
-                )
+        return tuple(
+            CoverageAddressTarget(
+                address_id=row["address_id"],
+                normalized_address=row["normalized_address"],
+                priority=row["priority"],
+                source_kind=row["source_kind"],
             )
-        for row in prediction_rows:
-            if len(selected) >= limit:
-                break
-            if row["address_id"] in seen:
-                continue
-            seen.add(row["address_id"])
-            selected.append(
-                CoverageAddressTarget(
-                    address_id=row["address_id"],
-                    normalized_address=row["normalized_address"],
-                    priority=0,
-                    source_kind="entity_prediction",
-                )
-            )
-        return tuple(selected)
+            for row in rows
+        )
 
     def _record_prediction_parse_result(
         self,

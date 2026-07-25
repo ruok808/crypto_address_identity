@@ -174,6 +174,25 @@ class ZeroXRouterClient:
             return ProviderFetchResult(response.status_code, "success", response.content)
         return ProviderFetchResult(response.status_code, "http_error", response.content)
 
+    def fetch_request_once(self, request: httpx.Request) -> ProviderFetchResult:
+        """Send exactly one request for cost-pinned bootstrap campaigns."""
+
+        try:
+            response = self._client.send(request)
+        except httpx.TransportError:
+            return ProviderFetchResult(None, "transport_error", b"")
+        if response.status_code == 429:
+            return ProviderFetchResult(
+                response.status_code, "rate_limited", response.content
+            )
+        if 200 <= response.status_code < 300:
+            return ProviderFetchResult(
+                response.status_code, "success", response.content
+            )
+        return ProviderFetchResult(
+            response.status_code, "http_error", response.content
+        )
+
     def _build_authenticated_request(
         self, path: str, *, params: dict[str, str] | None = None
     ) -> httpx.Request:
