@@ -38,7 +38,7 @@ STRICT_V2_S_DESTINATION_TABLE_ID = (
     "cai-btc-universe-20260724.cai_private."
     "btc_strict_v2_s_candidates_959187"
 )
-STRICT_V2_S_EXPECTED_DRY_RUN_BYTES = 638_112_721_818
+STRICT_V2_S_EXPECTED_DRY_RUN_BYTES = 638_126_831_178
 STRICT_V2_S_DESTINATION_EXPIRATION_HOURS = 168
 STRICT_V2_S_EXECUTION_RECEIPT_VERSION = (
     "btc_strict_v2_s_materialization_execution_receipt_v1"

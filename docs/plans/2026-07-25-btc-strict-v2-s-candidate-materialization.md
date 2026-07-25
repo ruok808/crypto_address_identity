@@ -95,7 +95,7 @@ destination table until the user separately authorizes the billed execution.
 
 Implementation is approved; billed execution remains separately gated.
 
-- [ ] Review the refreshed free dry-run estimate and available billing reserve.
+- [x] Review the refreshed free dry-run estimate and available billing reserve.
 - [ ] Obtain explicit approval for the exact estimate, SQL checksum, schema
   checksum, job id, destination table id, and `650,000,000,000` byte cap.
 - [x] Add a no-retry one-shot executor with an exclusive mode-`0600` receipt.
