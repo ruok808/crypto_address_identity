@@ -361,8 +361,14 @@ cai universe execute bigquery-strict-v2-s-materialization \
 ```
 
 Use `--dry-run` with the same arguments to inspect the execution contract
-without network or filesystem writes. If submission outcome is unknown, use
-`--reconcile-existing-job`; do not remove the receipt or resubmit.
+without network or filesystem writes. The executor creates the fixed
+`cai_private` dataset in `US` when absent and rejects any public access entry.
+If destination preparation fails before query submission, preserve the sealed
+receipt and rerun the same arguments with
+`--resume-after-preparation-failure`; this is permitted only when the receipt
+proves `execution_calls=0`. If submission outcome is unknown, use
+`--reconcile-existing-job`. Never remove the receipt, change the deterministic
+job id, or resubmit through a different command.
 
 Once the receipt is `completed`, publication reads only that destination table,
 recomputes every tier/mask/score/hash locally, rejects any duplicate or invalid

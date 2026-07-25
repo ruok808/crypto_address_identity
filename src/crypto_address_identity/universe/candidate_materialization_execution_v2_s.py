@@ -28,6 +28,7 @@ from crypto_address_identity.universe.candidate_materialization_v2_s import (
     STRICT_V2_S_RESULT_SCHEMA_VERSION,
     BigQueryStrictV2SMaterializationCostProbe,
     CandidateSchemaField,
+    StrictV2SMaterializationCheckpoint,
     StrictV2SMaterializationQueryPlan,
 )
 from crypto_address_identity.universe.models import UniverseModel
@@ -393,63 +394,7 @@ class StrictV2SMaterializationOneShotExecutor:
         if receipt_path.exists():
             raise StrictV2SMaterializationAlreadyAttempted()
 
-        cost = BigQueryStrictV2SMaterializationCostProbe(
-            backend=self._backend,
-            dataset=self._plan.dataset,
-            receipt_root=self._receipt_root,
-            max_source_age=self._max_source_age,
-            now=self._now,
-        ).run(
-            expected_query_sha256=request.expected_query_sha256,
-            expected_result_schema_sha256=(
-                request.expected_result_schema_sha256
-            ),
-            monthly_processing_budget_bytes=(
-                request.monthly_processing_budget_bytes
-            ),
-            reserve_bytes=request.reserve_bytes,
-        )
-        reasons = list(cost.blocking_reasons)
-        if cost.status != "checkpoint_passed":
-            reasons.append("strict_v2_s_execution_cost_gate_blocked")
-            return _outcome(
-                status="preflight_blocked",
-                request=request,
-                plan=self._plan,
-                receipt_path=receipt_path,
-                network_requests=cost.network_requests,
-                preflight_dry_run_bytes=cost.dry_run_bytes,
-                blocking_reasons=tuple(reasons),
-            )
-        comparisons = (
-            (
-                cost.source_schema_sha256,
-                request.expected_source_schema_sha256,
-                "strict_v2_s_execution_source_schema_mismatch",
-            ),
-            (
-                cost.successful_query_jobs,
-                request.expected_successful_query_jobs,
-                "strict_v2_s_execution_job_count_mismatch",
-            ),
-            (
-                cost.month_to_date_billed_bytes,
-                request.expected_month_to_date_billed_bytes,
-                "strict_v2_s_execution_monthly_bytes_mismatch",
-            ),
-        )
-        for actual, expected, reason in comparisons:
-            if actual != expected:
-                reasons.append(reason)
-        if cost.dry_run_bytes is None:
-            reasons.append("strict_v2_s_execution_dry_run_bytes_missing")
-        elif (
-            abs(cost.dry_run_bytes - request.expected_dry_run_bytes)
-            > STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES
-        ):
-            reasons.append(
-                "strict_v2_s_execution_dry_run_bytes_outside_tolerance"
-            )
+        cost, reasons = self._cost_checkpoint(request)
         if reasons:
             return _outcome(
                 status="preflight_blocked",
@@ -479,6 +424,128 @@ class StrictV2SMaterializationOneShotExecutor:
                 preflight_dry_run_bytes=cost.dry_run_bytes,
             ),
         )
+        return self._complete_attempt(
+            request=request,
+            receipt_path=receipt_path,
+            created_at=self._now,
+            expires_at=expires_at,
+            preflight_dry_run_bytes=cost.dry_run_bytes,
+            preflight_network_requests=cost.network_requests,
+        )
+
+    def resume_after_preparation_failure(
+        self,
+        request: StrictV2SMaterializationExecutionRequest,
+    ) -> StrictV2SMaterializationExecutionOutcome:
+        """Manually resume an attempt that submitted no query."""
+
+        _validate_plan(self._plan, request)
+        receipt_path = _receipt_path(
+            self._receipt_root,
+            request.authorization_id,
+        )
+        receipt = _read_attempt_receipt(
+            receipt_path,
+            request,
+            expected_status="preparation_failed",
+        )
+        cost, reasons = self._cost_checkpoint(request)
+        if reasons:
+            return _outcome(
+                status="preparation_failed",
+                request=request,
+                plan=self._plan,
+                receipt_path=receipt_path,
+                receipt_created=True,
+                network_requests=cost.network_requests,
+                preflight_dry_run_bytes=cost.dry_run_bytes,
+                blocking_reasons=(
+                    "strict_v2_s_preparation_recovery_preflight_blocked",
+                    *reasons,
+                ),
+                written_paths=(str(receipt_path),),
+            )
+        if cost.dry_run_bytes is None:
+            raise AssertionError("accepted cost checkpoint has no dry-run bytes")
+        created_at = _parse_receipt_time(receipt, "created_at")
+        expires_at = _parse_receipt_time(receipt, "expires_at")
+        return self._complete_attempt(
+            request=request,
+            receipt_path=receipt_path,
+            created_at=created_at,
+            expires_at=expires_at,
+            preflight_dry_run_bytes=cost.dry_run_bytes,
+            preflight_network_requests=cost.network_requests,
+            recovered_from_status="preparation_failed",
+        )
+
+    def _cost_checkpoint(
+        self,
+        request: StrictV2SMaterializationExecutionRequest,
+    ) -> tuple[StrictV2SMaterializationCheckpoint, tuple[str, ...]]:
+        cost = BigQueryStrictV2SMaterializationCostProbe(
+            backend=self._backend,
+            dataset=self._plan.dataset,
+            receipt_root=self._receipt_root,
+            max_source_age=self._max_source_age,
+            now=self._now,
+        ).run(
+            expected_query_sha256=request.expected_query_sha256,
+            expected_result_schema_sha256=(
+                request.expected_result_schema_sha256
+            ),
+            monthly_processing_budget_bytes=(
+                request.monthly_processing_budget_bytes
+            ),
+            reserve_bytes=request.reserve_bytes,
+        )
+        reasons = list(cost.blocking_reasons)
+        if cost.status != "checkpoint_passed":
+            reasons.append("strict_v2_s_execution_cost_gate_blocked")
+            return cost, tuple(reasons)
+        comparisons = (
+            (
+                cost.source_schema_sha256,
+                request.expected_source_schema_sha256,
+                "strict_v2_s_execution_source_schema_mismatch",
+            ),
+            (
+                cost.successful_query_jobs,
+                request.expected_successful_query_jobs,
+                "strict_v2_s_execution_job_count_mismatch",
+            ),
+            (
+                cost.month_to_date_billed_bytes,
+                request.expected_month_to_date_billed_bytes,
+                "strict_v2_s_execution_monthly_bytes_mismatch",
+            ),
+        )
+        for actual, expected, reason in comparisons:
+            if actual != expected:
+                reasons.append(reason)
+        if cost.dry_run_bytes is None:
+            reasons.append("strict_v2_s_execution_dry_run_bytes_missing")
+        elif (
+            abs(cost.dry_run_bytes - request.expected_dry_run_bytes)
+            > STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES
+        ):
+            reasons.append(
+                "strict_v2_s_execution_dry_run_bytes_outside_tolerance"
+            )
+        return cost, tuple(reasons)
+
+    def _complete_attempt(
+        self,
+        *,
+        request: StrictV2SMaterializationExecutionRequest,
+        receipt_path: Path,
+        created_at: datetime,
+        expires_at: datetime,
+        preflight_dry_run_bytes: int,
+        preflight_network_requests: int,
+        recovered_from_status: str | None = None,
+    ) -> StrictV2SMaterializationExecutionOutcome:
+        job_id = _job_id(request)
         try:
             destination = self._backend.prepare_destination_table_no_retry(
                 table_id=request.destination_table_id,
@@ -493,8 +560,8 @@ class StrictV2SMaterializationOneShotExecutor:
                 plan=self._plan,
                 receipt_path=receipt_path,
                 receipt_created=True,
-                network_requests=cost.network_requests + 1,
-                preflight_dry_run_bytes=cost.dry_run_bytes,
+                network_requests=preflight_network_requests + 1,
+                preflight_dry_run_bytes=preflight_dry_run_bytes,
                 blocking_reasons=(
                     "strict_v2_s_destination_preparation_failed",
                 ),
@@ -505,12 +572,27 @@ class StrictV2SMaterializationOneShotExecutor:
                 _terminal_receipt_payload(
                     outcome=outcome,
                     request=request,
-                    created_at=self._now,
+                    created_at=created_at,
                     expires_at=expires_at,
+                    recovered_from_status=recovered_from_status,
                 ),
             )
             return outcome
 
+        if recovered_from_status is not None:
+            _replace_receipt(
+                receipt_path,
+                _receipt_payload(
+                    status="started",
+                    request=request,
+                    plan=self._plan,
+                    job_id=job_id,
+                    created_at=created_at,
+                    expires_at=expires_at,
+                    preflight_dry_run_bytes=preflight_dry_run_bytes,
+                    recovered_from_status=recovered_from_status,
+                ),
+            )
         try:
             execution = (
                 self._backend.execute_query_to_destination_no_retry(
@@ -532,8 +614,8 @@ class StrictV2SMaterializationOneShotExecutor:
                 receipt_path=receipt_path,
                 receipt_created=True,
                 execution_calls=1,
-                network_requests=cost.network_requests + 2,
-                preflight_dry_run_bytes=cost.dry_run_bytes,
+                network_requests=preflight_network_requests + 2,
+                preflight_dry_run_bytes=preflight_dry_run_bytes,
                 blocking_reasons=(
                     "strict_v2_s_materialization_submission_unknown",
                 ),
@@ -544,8 +626,9 @@ class StrictV2SMaterializationOneShotExecutor:
                 _terminal_receipt_payload(
                     outcome=outcome,
                     request=request,
-                    created_at=self._now,
+                    created_at=created_at,
                     expires_at=expires_at,
+                    recovered_from_status=recovered_from_status,
                 ),
             )
             return outcome
@@ -554,16 +637,17 @@ class StrictV2SMaterializationOneShotExecutor:
             execution=execution,
             request=request,
             receipt_path=receipt_path,
-            network_requests=cost.network_requests + 2,
-            preflight_dry_run_bytes=cost.dry_run_bytes,
+            network_requests=preflight_network_requests + 2,
+            preflight_dry_run_bytes=preflight_dry_run_bytes,
         )
         _replace_receipt(
             receipt_path,
             _terminal_receipt_payload(
                 outcome=outcome,
                 request=request,
-                created_at=self._now,
+                created_at=created_at,
                 expires_at=expires_at,
+                recovered_from_status=recovered_from_status,
             ),
         )
         return outcome
@@ -674,16 +758,7 @@ class GoogleBigQueryStrictV2SMaterializationBackend(
             )
         dataset_id = table_id.rsplit(".", 1)[0]
         try:
-            dataset = self._client.get_dataset(dataset_id)
-            for entry in getattr(dataset, "access_entries", ()):
-                if (
-                    getattr(entry, "entity_type", None) == "specialGroup"
-                    and getattr(entry, "entity_id", None)
-                    in {"allAuthenticatedUsers", "allUsers"}
-                ):
-                    raise BigQueryBoundaryError(
-                        "BigQuery destination dataset is public"
-                    )
+            self._ensure_private_destination_dataset(dataset_id)
             table = self._bigquery.Table(
                 table_id,
                 schema=[
@@ -708,6 +783,46 @@ class GoogleBigQueryStrictV2SMaterializationBackend(
                 "BigQuery destination preparation failed"
             ) from exc
         return self._destination_metadata(created)
+
+    def _ensure_private_destination_dataset(
+        self,
+        dataset_id: str,
+    ) -> None:
+        expected_location = str(
+            getattr(self._client, "location", "") or "US"
+        ).upper()
+        try:
+            dataset = self._client.get_dataset(dataset_id, retry=None)
+        except Exception as exc:
+            if _exception_status_code(exc) != 404:
+                raise BigQueryBoundaryError(
+                    "BigQuery destination dataset is unavailable"
+                ) from exc
+            resource = self._bigquery.Dataset(dataset_id)
+            resource.location = expected_location
+            try:
+                dataset = self._client.create_dataset(
+                    resource,
+                    exists_ok=False,
+                    retry=None,
+                )
+            except Exception as create_exc:
+                raise BigQueryBoundaryError(
+                    "BigQuery private destination dataset creation failed"
+                ) from create_exc
+        if str(getattr(dataset, "location", "")).upper() != expected_location:
+            raise BigQueryBoundaryError(
+                "BigQuery destination dataset location mismatch"
+            )
+        for entry in getattr(dataset, "access_entries", ()):
+            if (
+                getattr(entry, "entity_type", None) == "specialGroup"
+                and getattr(entry, "entity_id", None)
+                in {"allAuthenticatedUsers", "allUsers"}
+            ):
+                raise BigQueryBoundaryError(
+                    "BigQuery destination dataset is public"
+                )
 
     def execute_query_to_destination_no_retry(
         self,
@@ -921,6 +1036,14 @@ def _canonical_bigquery_type(value: str) -> str:
     return _BIGQUERY_TYPE_ALIASES.get(normalized, normalized)
 
 
+def _exception_status_code(error: Exception) -> int | None:
+    value = getattr(error, "code", None)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _validate_plan(
     plan: StrictV2SMaterializationQueryPlan,
     request: StrictV2SMaterializationExecutionRequest,
@@ -986,8 +1109,9 @@ def _receipt_payload(
     created_at: datetime,
     expires_at: datetime,
     preflight_dry_run_bytes: int,
+    recovered_from_status: str | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "schema_version": STRICT_V2_S_EXECUTION_RECEIPT_VERSION,
         "status": status,
         "authorization_id": request.authorization_id,
@@ -1009,6 +1133,9 @@ def _receipt_payload(
         "automatic_retries": 0,
         "candidate_materialized": False,
     }
+    if recovered_from_status is not None:
+        payload["recovered_from_status"] = recovered_from_status
+    return payload
 
 
 def _terminal_receipt_payload(
@@ -1017,8 +1144,9 @@ def _terminal_receipt_payload(
     request: StrictV2SMaterializationExecutionRequest,
     created_at: datetime,
     expires_at: datetime,
+    recovered_from_status: str | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "schema_version": STRICT_V2_S_EXECUTION_RECEIPT_VERSION,
         "status": outcome.status,
         "authorization_id": outcome.authorization_id,
@@ -1058,6 +1186,9 @@ def _terminal_receipt_payload(
         "blocking_reasons": list(outcome.blocking_reasons),
         "automatic_retries": 0,
     }
+    if recovered_from_status is not None:
+        payload["recovered_from_status"] = recovered_from_status
+    return payload
 
 
 def _create_receipt_exclusive(
@@ -1109,6 +1240,19 @@ def _read_reconcilable_receipt(
     path: Path,
     request: StrictV2SMaterializationExecutionRequest,
 ) -> dict[str, object]:
+    return _read_attempt_receipt(
+        path,
+        request,
+        expected_status="submission_unknown",
+    )
+
+
+def _read_attempt_receipt(
+    path: Path,
+    request: StrictV2SMaterializationExecutionRequest,
+    *,
+    expected_status: str,
+) -> dict[str, object]:
     try:
         metadata = path.stat()
         if stat.S_IMODE(metadata.st_mode) != 0o600:
@@ -1118,13 +1262,21 @@ def _read_reconcilable_receipt(
             not isinstance(payload, dict)
             or payload.get("schema_version")
             != STRICT_V2_S_EXECUTION_RECEIPT_VERSION
-            or payload.get("status") != "submission_unknown"
+            or payload.get("status") != expected_status
             or payload.get("authorization_id")
             != request.authorization_id
+            or payload.get("job_id") != _job_id(request)
             or payload.get("destination_table_id")
             != request.destination_table_id
             or payload.get("query_sha256")
             != request.expected_query_sha256
+            or payload.get("result_schema_sha256")
+            != request.expected_result_schema_sha256
+            or payload.get("source_schema_sha256")
+            != request.expected_source_schema_sha256
+            or payload.get("maximum_bytes_billed")
+            != request.maximum_bytes_billed
+            or payload.get("candidate_materialized") is not False
             or not isinstance(
                 payload.get("preflight_dry_run_bytes"),
                 int,
@@ -1141,6 +1293,20 @@ def _read_reconcilable_receipt(
         return payload
     except StrictV2SMaterializationReceiptInvalid:
         raise
+    except Exception as exc:
+        raise StrictV2SMaterializationReceiptInvalid() from exc
+
+
+def _parse_receipt_time(
+    receipt: dict[str, object],
+    field_name: str,
+) -> datetime:
+    try:
+        return _as_utc(
+            datetime.fromisoformat(
+                str(receipt[field_name]).replace("Z", "+00:00")
+            )
+        )
     except Exception as exc:
         raise StrictV2SMaterializationReceiptInvalid() from exc
 

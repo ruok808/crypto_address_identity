@@ -8,10 +8,12 @@ from pathlib import Path
 import pytest
 
 from crypto_address_identity.universe.bigquery import (
+    BigQueryBoundaryError,
     MonthlyQueryUsage,
     QueryEstimate,
 )
 from crypto_address_identity.universe.candidate_materialization_execution_v2_s import (
+    GoogleBigQueryStrictV2SMaterializationBackend,
     STRICT_V2_S_AUTHORIZATION_ID,
     STRICT_V2_S_DESTINATION_TABLE_ID,
     STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES,
@@ -21,6 +23,7 @@ from crypto_address_identity.universe.candidate_materialization_execution_v2_s i
     StrictV2SMaterializationAlreadyAttempted,
     StrictV2SMaterializationExecutionRequest,
     StrictV2SMaterializationOneShotExecutor,
+    StrictV2SMaterializationReceiptInvalid,
     candidate_destination_schema_sha256,
     preview_strict_v2_s_materialization_execution,
 )
@@ -45,6 +48,46 @@ DATASET = "bigquery-public-data.crypto_bitcoin"
 SOURCE_SCHEMA_SHA256 = (
     "7353193a75b43704d273b8bcfc4a0d4d56fc9cdc6623704bb25855a0f439dfb7"
 )
+
+
+class _MissingDatasetError(Exception):
+    code = 404
+
+
+class _DatasetResource:
+    def __init__(self, dataset_id: str) -> None:
+        self.dataset_id = dataset_id
+        self.location: str | None = None
+        self.access_entries: tuple[object, ...] = ()
+
+
+class _DatasetSdk:
+    Dataset = _DatasetResource
+
+
+class _DatasetClient:
+    location = "US"
+
+    def __init__(self, *, access_entries: tuple[object, ...] = ()) -> None:
+        self.access_entries = access_entries
+        self.created: list[_DatasetResource] = []
+
+    def get_dataset(self, dataset_id: str, *, retry: object):
+        assert retry is None
+        raise _MissingDatasetError()
+
+    def create_dataset(
+        self,
+        resource: _DatasetResource,
+        *,
+        exists_ok: bool,
+        retry: object,
+    ) -> _DatasetResource:
+        assert exists_ok is False
+        assert retry is None
+        resource.access_entries = self.access_entries
+        self.created.append(resource)
+        return resource
 
 
 def _write_exact_population_receipts(
@@ -254,6 +297,50 @@ def test_destination_schema_normalizes_bigquery_integer_alias() -> None:
     )
 
 
+def test_missing_destination_dataset_is_created_private_in_us() -> None:
+    backend = object.__new__(
+        GoogleBigQueryStrictV2SMaterializationBackend
+    )
+    client = _DatasetClient()
+    backend._client = client
+    backend._bigquery = _DatasetSdk
+
+    backend._ensure_private_destination_dataset(
+        "cai-btc-universe-20260724.cai_private"
+    )
+
+    assert len(client.created) == 1
+    assert client.created[0].dataset_id == (
+        "cai-btc-universe-20260724.cai_private"
+    )
+    assert client.created[0].location == "US"
+    assert client.created[0].access_entries == ()
+
+
+def test_destination_dataset_creation_blocks_public_access() -> None:
+    backend = object.__new__(
+        GoogleBigQueryStrictV2SMaterializationBackend
+    )
+    public_entry = type(
+        "AccessEntry",
+        (),
+        {
+            "entity_type": "specialGroup",
+            "entity_id": "allUsers",
+        },
+    )()
+    backend._client = _DatasetClient(access_entries=(public_entry,))
+    backend._bigquery = _DatasetSdk
+
+    with pytest.raises(
+        BigQueryBoundaryError,
+        match="dataset is public",
+    ):
+        backend._ensure_private_destination_dataset(
+            "cai-btc-universe-20260724.cai_private"
+        )
+
+
 def test_execution_preview_is_offline_and_writes_nothing(
     tmp_path: Path,
 ) -> None:
@@ -386,6 +473,48 @@ def test_execution_writes_exact_destination_once_and_seals_receipt(
 
     with pytest.raises(StrictV2SMaterializationAlreadyAttempted):
         executor.run(_request())
+    assert backend.execution_calls == 1
+
+
+def test_manual_resume_after_preparation_failure_uses_same_job_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt_root = _write_exact_population_receipts(tmp_path, monkeypatch)
+    backend = FakeMaterializationBackend(preparation_error=True)
+    executor = StrictV2SMaterializationOneShotExecutor(
+        backend=backend,
+        dataset=DATASET,
+        receipt_root=receipt_root,
+        max_source_age=timedelta(hours=48),
+        now=NOW,
+    )
+    request = _request()
+
+    failed = executor.run(request)
+    failed_receipt = json.loads(
+        Path(failed.receipt_path).read_text(encoding="utf-8")
+    )
+    assert failed.status == "preparation_failed"
+    assert failed.execution_calls == 0
+    assert failed_receipt["status"] == "preparation_failed"
+
+    backend.preparation_error = False
+    completed = executor.resume_after_preparation_failure(request)
+
+    assert completed.status == "completed"
+    assert completed.job_id == failed.job_id
+    assert completed.execution_calls == 1
+    assert completed.candidate_materialized is True
+    assert backend.execution_calls == 1
+    receipt = json.loads(
+        Path(completed.receipt_path).read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "completed"
+    assert receipt["recovered_from_status"] == "preparation_failed"
+
+    with pytest.raises(StrictV2SMaterializationReceiptInvalid):
+        executor.resume_after_preparation_failure(request)
     assert backend.execution_calls == 1
 
 

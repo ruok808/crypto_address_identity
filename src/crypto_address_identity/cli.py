@@ -593,6 +593,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--reconcile-existing-job",
         action="store_true",
     )
+    strict_v2_s_execution_mode.add_argument(
+        "--resume-after-preparation-failure",
+        action="store_true",
+    )
     universe_execute_strict_v2_s.add_argument(
         "--authorization-id",
         required=True,
@@ -1479,6 +1483,8 @@ def _handle_universe_execute_bigquery_strict_v2_s_materialization(
                 request,
                 timeout_seconds=arguments.reconcile_timeout_seconds,
             )
+        elif arguments.resume_after_preparation_failure:
+            outcome = executor.resume_after_preparation_failure(request)
         else:
             outcome = executor.run(request)
     except StrictV2SMaterializationAlreadyAttempted as exc:

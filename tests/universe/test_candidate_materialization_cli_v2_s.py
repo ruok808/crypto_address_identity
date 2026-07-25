@@ -181,6 +181,42 @@ def test_execution_cli_uses_one_shot_backend(
     assert backend.execution_calls == 1
 
 
+def test_execution_cli_resumes_sealed_preparation_failure(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    _write_exact_population_receipts(
+        tmp_path / "universe",
+        monkeypatch,
+    )
+    backend = FakeMaterializationBackend(preparation_error=True)
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_strict_v2_s_backend",
+        lambda settings: backend,
+    )
+
+    assert main(_execution_arguments("--execute-once")) == 0
+    failed = _output(capsys)
+    assert failed["status"] == "preparation_failed"
+    assert failed["execution_calls"] == 0
+
+    backend.preparation_error = False
+    assert (
+        main(
+            _execution_arguments(
+                "--resume-after-preparation-failure"
+            )
+        )
+        == 0
+    )
+    completed = _output(capsys)
+    assert completed["status"] == "completed"
+    assert completed["job_id"] == failed["job_id"]
+    assert backend.execution_calls == 1
+
+
 def test_publication_cli_preview_is_offline(
     monkeypatch,
     tmp_path: Path,

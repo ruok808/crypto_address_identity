@@ -86,12 +86,18 @@ The query must:
 - use a deterministic job id;
 - set `maximum_bytes_billed=650_000_000_000`;
 - disable automatic query retry;
+- create the fixed `cai_private` dataset in `US` with no public access entry
+  when it does not yet exist;
 - write with `WRITE_EMPTY` to a deterministic, private destination table with
   a seven-day expiration.
 
 Do not use `CREATE OR REPLACE`. An existing destination table triggers
 same-job reconciliation and schema/checksum validation, never overwrite or a
-second query.
+second query. A sealed `preparation_failed` receipt with
+`execution_calls=0` may be resumed only through the explicit preparation
+recovery command. Recovery reruns all preflight gates and uses the same
+authorization, table, and deterministic job id; deleting the receipt or
+minting another job id is forbidden.
 
 Before execution, run one free dry run. Pin its byte estimate, query checksum,
 schema checksum, monthly billed usage, and reserve in a separate authorization
