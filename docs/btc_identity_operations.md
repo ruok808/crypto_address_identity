@@ -307,7 +307,7 @@ cai universe probe bigquery-strict-v2-s-materialization --live-dry-run \
   5cb4990e01b4983910d0d813b67e148b985111108e6a26a251fadf95b18506d3 \
   --expected-result-schema-sha256 \
   ae5e08ff63b55f9bce3f5bbd17f858f2a29ec3da85223fd2f3c6675043883683 \
-  --monthly-processing-budget-bytes 2000000000000 \
+  --monthly-processing-budget-bytes 2400000000000 \
   --reserve-bytes 250000000000
 ```
 
@@ -330,7 +330,12 @@ After that authorization, the one-shot command must repeat every pinned value
 from the accepted checkpoint. `--execute-once` creates one private expiring
 destination table and one mode-`0600` receipt. It sets
 `maximum_bytes_billed=650000000000`, uses `WRITE_EMPTY`, disables automatic
-retry, and cannot submit a fallback query:
+retry, and cannot submit a fallback query. Because BigQuery can vary the
+physical dry-run estimate for an actively growing source partition, execution
+allows at most `1,000,000,000` bytes of drift from the accepted baseline. The
+actual preflight estimate is recorded in the receipt; query/schema drift,
+larger byte drift, cap failure, or monthly reserve failure still blocks before
+destination creation:
 
 ```bash
 cai universe execute bigquery-strict-v2-s-materialization \

@@ -39,6 +39,7 @@ STRICT_V2_S_DESTINATION_TABLE_ID = (
     "btc_strict_v2_s_candidates_959187"
 )
 STRICT_V2_S_EXPECTED_DRY_RUN_BYTES = 638_126_831_178
+STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES = 1_000_000_000
 STRICT_V2_S_DESTINATION_EXPIRATION_HOURS = 168
 STRICT_V2_S_EXECUTION_RECEIPT_VERSION = (
     "btc_strict_v2_s_materialization_execution_receipt_v1"
@@ -276,6 +277,7 @@ class StrictV2SMaterializationExecutionOutcome(UniverseModel):
     reconciled_existing_job: bool = False
     total_bytes_processed: int | None = Field(default=None, ge=0)
     total_bytes_billed: int | None = Field(default=None, ge=0)
+    preflight_dry_run_bytes: int | None = Field(default=None, ge=0)
     blocking_reasons: tuple[str, ...] = ()
     provider_requests: Literal[0] = 0
     provider_points: Literal[0] = 0
@@ -416,6 +418,7 @@ class StrictV2SMaterializationOneShotExecutor:
                 plan=self._plan,
                 receipt_path=receipt_path,
                 network_requests=cost.network_requests,
+                preflight_dry_run_bytes=cost.dry_run_bytes,
                 blocking_reasons=tuple(reasons),
             )
         comparisons = (
@@ -423,11 +426,6 @@ class StrictV2SMaterializationOneShotExecutor:
                 cost.source_schema_sha256,
                 request.expected_source_schema_sha256,
                 "strict_v2_s_execution_source_schema_mismatch",
-            ),
-            (
-                cost.dry_run_bytes,
-                request.expected_dry_run_bytes,
-                "strict_v2_s_execution_dry_run_bytes_mismatch",
             ),
             (
                 cost.successful_query_jobs,
@@ -443,6 +441,15 @@ class StrictV2SMaterializationOneShotExecutor:
         for actual, expected, reason in comparisons:
             if actual != expected:
                 reasons.append(reason)
+        if cost.dry_run_bytes is None:
+            reasons.append("strict_v2_s_execution_dry_run_bytes_missing")
+        elif (
+            abs(cost.dry_run_bytes - request.expected_dry_run_bytes)
+            > STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES
+        ):
+            reasons.append(
+                "strict_v2_s_execution_dry_run_bytes_outside_tolerance"
+            )
         if reasons:
             return _outcome(
                 status="preflight_blocked",
@@ -450,8 +457,11 @@ class StrictV2SMaterializationOneShotExecutor:
                 plan=self._plan,
                 receipt_path=receipt_path,
                 network_requests=cost.network_requests,
+                preflight_dry_run_bytes=cost.dry_run_bytes,
                 blocking_reasons=tuple(reasons),
             )
+        if cost.dry_run_bytes is None:
+            raise AssertionError("accepted cost checkpoint has no dry-run bytes")
 
         job_id = _job_id(request)
         expires_at = self._now + timedelta(
@@ -466,6 +476,7 @@ class StrictV2SMaterializationOneShotExecutor:
                 job_id=job_id,
                 created_at=self._now,
                 expires_at=expires_at,
+                preflight_dry_run_bytes=cost.dry_run_bytes,
             ),
         )
         try:
@@ -483,6 +494,7 @@ class StrictV2SMaterializationOneShotExecutor:
                 receipt_path=receipt_path,
                 receipt_created=True,
                 network_requests=cost.network_requests + 1,
+                preflight_dry_run_bytes=cost.dry_run_bytes,
                 blocking_reasons=(
                     "strict_v2_s_destination_preparation_failed",
                 ),
@@ -521,6 +533,7 @@ class StrictV2SMaterializationOneShotExecutor:
                 receipt_created=True,
                 execution_calls=1,
                 network_requests=cost.network_requests + 2,
+                preflight_dry_run_bytes=cost.dry_run_bytes,
                 blocking_reasons=(
                     "strict_v2_s_materialization_submission_unknown",
                 ),
@@ -542,6 +555,7 @@ class StrictV2SMaterializationOneShotExecutor:
             request=request,
             receipt_path=receipt_path,
             network_requests=cost.network_requests + 2,
+            preflight_dry_run_bytes=cost.dry_run_bytes,
         )
         _replace_receipt(
             receipt_path,
@@ -577,6 +591,9 @@ class StrictV2SMaterializationOneShotExecutor:
             receipt_path=receipt_path,
             network_requests=1,
             reconciled_existing_job=True,
+            preflight_dry_run_bytes=int(
+                receipt["preflight_dry_run_bytes"]
+            ),
         )
         _replace_receipt(
             receipt_path,
@@ -605,6 +622,7 @@ class StrictV2SMaterializationOneShotExecutor:
         receipt_path: Path,
         network_requests: int,
         reconciled_existing_job: bool = False,
+        preflight_dry_run_bytes: int,
     ) -> StrictV2SMaterializationExecutionOutcome:
         reasons: list[str] = []
         if execution.destination_table_id != request.destination_table_id:
@@ -632,6 +650,7 @@ class StrictV2SMaterializationOneShotExecutor:
             reconciled_existing_job=reconciled_existing_job,
             total_bytes_processed=execution.total_bytes_processed,
             total_bytes_billed=execution.total_bytes_billed,
+            preflight_dry_run_bytes=preflight_dry_run_bytes,
             blocking_reasons=tuple(reasons),
             written_paths=(str(receipt_path),),
         )
@@ -966,6 +985,7 @@ def _receipt_payload(
     job_id: str,
     created_at: datetime,
     expires_at: datetime,
+    preflight_dry_run_bytes: int,
 ) -> dict[str, object]:
     return {
         "schema_version": STRICT_V2_S_EXECUTION_RECEIPT_VERSION,
@@ -980,6 +1000,10 @@ def _receipt_payload(
         "result_schema_sha256": request.expected_result_schema_sha256,
         "source_schema_sha256": request.expected_source_schema_sha256,
         "expected_dry_run_bytes": request.expected_dry_run_bytes,
+        "preflight_dry_run_bytes": preflight_dry_run_bytes,
+        "dry_run_drift_tolerance_bytes": (
+            STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES
+        ),
         "maximum_bytes_billed": request.maximum_bytes_billed,
         "expected_candidate_rows": request.expected_candidate_rows,
         "automatic_retries": 0,
@@ -1007,6 +1031,10 @@ def _terminal_receipt_payload(
         "result_schema_sha256": outcome.result_schema_sha256,
         "source_schema_sha256": outcome.source_schema_sha256,
         "expected_dry_run_bytes": request.expected_dry_run_bytes,
+        "preflight_dry_run_bytes": outcome.preflight_dry_run_bytes,
+        "dry_run_drift_tolerance_bytes": (
+            STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES
+        ),
         "expected_successful_query_jobs": (
             request.expected_successful_query_jobs
         ),
@@ -1097,6 +1125,17 @@ def _read_reconcilable_receipt(
             != request.destination_table_id
             or payload.get("query_sha256")
             != request.expected_query_sha256
+            or not isinstance(
+                payload.get("preflight_dry_run_bytes"),
+                int,
+            )
+            or abs(
+                int(payload["preflight_dry_run_bytes"])
+                - request.expected_dry_run_bytes
+            )
+            > STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES
+            or payload.get("dry_run_drift_tolerance_bytes")
+            != STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES
         ):
             raise StrictV2SMaterializationReceiptInvalid()
         return payload
@@ -1139,6 +1178,7 @@ def _outcome(
     reconciled_existing_job: bool = False,
     total_bytes_processed: int | None = None,
     total_bytes_billed: int | None = None,
+    preflight_dry_run_bytes: int | None = None,
     blocking_reasons: tuple[str, ...] = (),
     written_paths: tuple[str, ...] = (),
 ) -> StrictV2SMaterializationExecutionOutcome:
@@ -1159,6 +1199,7 @@ def _outcome(
         reconciled_existing_job=reconciled_existing_job,
         total_bytes_processed=total_bytes_processed,
         total_bytes_billed=total_bytes_billed,
+        preflight_dry_run_bytes=preflight_dry_run_bytes,
         blocking_reasons=blocking_reasons,
         written_paths=written_paths,
     )

@@ -14,6 +14,7 @@ from crypto_address_identity.universe.bigquery import (
 from crypto_address_identity.universe.candidate_materialization_execution_v2_s import (
     STRICT_V2_S_AUTHORIZATION_ID,
     STRICT_V2_S_DESTINATION_TABLE_ID,
+    STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES,
     STRICT_V2_S_EXPECTED_DRY_RUN_BYTES,
     CandidateDestinationMetadata,
     StrictV2SCloudExecution,
@@ -271,12 +272,18 @@ def test_execution_preview_is_offline_and_writes_nothing(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_execution_preflight_drift_blocks_before_receipt_or_destination(
+def test_execution_preflight_out_of_tolerance_blocks_before_destination(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt_root = _write_exact_population_receipts(tmp_path, monkeypatch)
-    backend = FakeMaterializationBackend(dry_run_bytes=1)
+    backend = FakeMaterializationBackend(
+        dry_run_bytes=(
+            STRICT_V2_S_EXPECTED_DRY_RUN_BYTES
+            + STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES
+            + 1
+        )
+    )
 
     outcome = StrictV2SMaterializationOneShotExecutor(
         backend=backend,
@@ -287,13 +294,45 @@ def test_execution_preflight_drift_blocks_before_receipt_or_destination(
     ).run(_request())
 
     assert outcome.status == "preflight_blocked"
-    assert "strict_v2_s_execution_dry_run_bytes_mismatch" in (
+    assert "strict_v2_s_execution_dry_run_bytes_outside_tolerance" in (
         outcome.blocking_reasons
     )
     assert outcome.execution_calls == 0
     assert outcome.receipt_created is False
     assert "prepare_destination" not in backend.calls
     assert "execute_query_to_destination" not in backend.calls
+
+
+def test_execution_accepts_bounded_dry_run_drift_and_records_actual(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt_root = _write_exact_population_receipts(tmp_path, monkeypatch)
+    actual_dry_run_bytes = STRICT_V2_S_EXPECTED_DRY_RUN_BYTES + 8_001_129
+    backend = FakeMaterializationBackend(
+        dry_run_bytes=actual_dry_run_bytes,
+    )
+
+    outcome = StrictV2SMaterializationOneShotExecutor(
+        backend=backend,
+        dataset=DATASET,
+        receipt_root=receipt_root,
+        max_source_age=timedelta(hours=48),
+        now=NOW,
+    ).run(_request())
+
+    assert outcome.status == "completed"
+    assert outcome.preflight_dry_run_bytes == actual_dry_run_bytes
+    receipt = json.loads(
+        Path(outcome.receipt_path).read_text(encoding="utf-8")
+    )
+    assert receipt["expected_dry_run_bytes"] == (
+        STRICT_V2_S_EXPECTED_DRY_RUN_BYTES
+    )
+    assert receipt["preflight_dry_run_bytes"] == actual_dry_run_bytes
+    assert receipt["dry_run_drift_tolerance_bytes"] == (
+        STRICT_V2_S_DRY_RUN_DRIFT_TOLERANCE_BYTES
+    )
 
 
 def test_execution_writes_exact_destination_once_and_seals_receipt(

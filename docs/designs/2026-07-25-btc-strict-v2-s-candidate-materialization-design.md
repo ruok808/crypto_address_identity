@@ -93,10 +93,15 @@ Do not use `CREATE OR REPLACE`. An existing destination table triggers
 same-job reconciliation and schema/checksum validation, never overwrite or a
 second query.
 
-Before execution, run one free dry run. Pin its exact byte estimate, query
-checksum, schema checksum, monthly billed usage, and reserve in a separate
-authorization receipt. Any drift requires review; it must not be accepted by
-raising the byte cap.
+Before execution, run one free dry run. Pin its byte estimate, query checksum,
+schema checksum, monthly billed usage, and reserve in a separate authorization
+receipt. BigQuery may vary the physical scan estimate for a still-growing
+source partition even when the fixed query and cutoff are unchanged. The
+bootstrap executor therefore accepts at most `1,000,000,000` bytes of
+two-sided drift from the pinned estimate, records the actual preflight value,
+and still requires it to pass the fixed `650,000,000,000` byte cap and monthly
+reserve gate. Drift beyond that tolerance requires new review; it must not be
+accepted by raising the byte cap.
 
 ## Candidate Row Contract
 

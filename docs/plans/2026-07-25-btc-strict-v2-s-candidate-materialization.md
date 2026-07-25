@@ -48,6 +48,8 @@ destination table until the user separately authorizes the billed execution.
   - coarse-other `932,802`;
 - future execution cap: `650,000,000,000` bytes;
 - automatic query retries: `0`;
+- permitted physical dry-run estimate drift: at most `1,000,000,000` bytes
+  from the accepted baseline, while remaining under every cost gate;
 - provider requests/points: `0/0`.
 
 ## Phase 1: Free Cost Checkpoint
