@@ -67,6 +67,10 @@ from crypto_address_identity.universe.candidate_statistics import (
 from crypto_address_identity.universe.candidate_statistics_v2 import (
     BigQueryCandidateStatisticsV2Probe,
 )
+from crypto_address_identity.universe.candidate_materialization_v2_s import (
+    BigQueryStrictV2SMaterializationCostProbe,
+    preview_strict_v2_s_materialization_checkpoint,
+)
 from crypto_address_identity.universe.candidate_execution import (
     CandidateStatisticsExecutionAlreadyAttempted,
     CandidateStatisticsExecutionRequest,
@@ -360,6 +364,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe_probe_candidate_statistics_v2.set_defaults(
         handler=_handle_universe_probe_bigquery_candidate_statistics_v2
+    )
+
+    universe_probe_strict_v2_s = universe_probe_commands.add_parser(
+        "bigquery-strict-v2-s-materialization"
+    )
+    strict_v2_s_mode = universe_probe_strict_v2_s.add_mutually_exclusive_group(
+        required=True
+    )
+    strict_v2_s_mode.add_argument("--dry-run", action="store_true")
+    strict_v2_s_mode.add_argument("--live-dry-run", action="store_true")
+    universe_probe_strict_v2_s.add_argument("--expected-query-sha256")
+    universe_probe_strict_v2_s.add_argument(
+        "--expected-result-schema-sha256"
+    )
+    universe_probe_strict_v2_s.add_argument(
+        "--monthly-processing-budget-bytes",
+        type=int,
+        default=0,
+    )
+    universe_probe_strict_v2_s.add_argument(
+        "--reserve-bytes",
+        type=int,
+        default=250_000_000_000,
+    )
+    universe_probe_strict_v2_s.set_defaults(
+        handler=_handle_universe_probe_bigquery_strict_v2_s_materialization
     )
 
     universe_execute = universe_commands.add_parser("execute")
@@ -1192,6 +1222,49 @@ def _handle_universe_probe_bigquery_candidate_statistics_v2(
         "provider_points": 0,
         "written_paths": [],
     }
+
+
+def _handle_universe_probe_bigquery_strict_v2_s_materialization(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    if arguments.dry_run:
+        outcome = preview_strict_v2_s_materialization_checkpoint(
+            dataset=settings.bigquery_dataset,
+        )
+        return outcome.model_dump(mode="json")
+
+    if not arguments.expected_query_sha256:
+        raise CliError("expected Strict V2-S query SHA-256 required")
+    if not arguments.expected_result_schema_sha256:
+        raise CliError("expected Strict V2-S result schema SHA-256 required")
+    if arguments.monthly_processing_budget_bytes <= 0:
+        raise CliError("positive monthly processing budget required")
+    if (
+        arguments.reserve_bytes < 0
+        or arguments.reserve_bytes
+        >= arguments.monthly_processing_budget_bytes
+    ):
+        raise CliError("BigQuery reserve must be below monthly budget")
+
+    outcome = BigQueryStrictV2SMaterializationCostProbe(
+        backend=_make_bigquery_backend(settings),
+        dataset=settings.bigquery_dataset,
+        receipt_root=settings.universe_root / "executions",
+        max_source_age=timedelta(
+            hours=settings.universe_max_source_age_hours
+        ),
+    ).run(
+        expected_query_sha256=arguments.expected_query_sha256,
+        expected_result_schema_sha256=(
+            arguments.expected_result_schema_sha256
+        ),
+        monthly_processing_budget_bytes=(
+            arguments.monthly_processing_budget_bytes
+        ),
+        reserve_bytes=arguments.reserve_bytes,
+    )
+    return outcome.model_dump(mode="json")
 
 
 def _handle_universe_execute_bigquery_candidate_statistics(

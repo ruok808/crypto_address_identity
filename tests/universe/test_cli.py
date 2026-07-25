@@ -36,6 +36,10 @@ from crypto_address_identity.universe.candidate_statistics_v2 import (
     PINNED_V2_SOURCE_INPUT_ONLY_ADDRESS_COUNT,
     PINNED_V2_SOURCE_STANDARD_ADDRESS_COUNT,
 )
+from crypto_address_identity.universe.candidate_materialization_v2_s import (
+    PINNED_STRICT_V2_S_QUERY_SHA256,
+    STRICT_V2_S_CANDIDATE_SCHEMA_SHA256,
+)
 from crypto_address_identity.universe.features import FeatureMaterializationResult
 from crypto_address_identity.universe.models import SourceManifest, SourceProbeResult
 from crypto_address_identity.universe.query_plan import BigQueryQueryPlan
@@ -60,6 +64,10 @@ from tests.universe.test_candidate_execution_v2 import (
 )
 from tests.universe.test_candidate_population_contract_v2 import (
     _write_pair as write_dual_population_receipts,
+)
+from tests.universe.test_candidate_materialization_v2_s import (
+    FakeStrictV2SBackend,
+    _write_exact_receipts,
 )
 
 
@@ -800,6 +808,109 @@ def test_bigquery_candidate_statistics_v2_live_dry_run_never_executes_or_writes(
     ]
     assert backend.query_caps == []
     assert not (tmp_path / "universe").exists()
+
+
+def test_strict_v2_s_materialization_preview_is_offline_and_fixed(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: (_ for _ in ()).throw(
+            AssertionError("network boundary")
+        ),
+    )
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-strict-v2-s-materialization",
+            "--dry-run",
+        ]
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "dry_run"
+    assert output["query_kind"] == (
+        "btc_strict_v2_s_candidate_materialization"
+    )
+    assert output["policy_version"] == "btc_importance_v2"
+    assert output["variant"] == "V2-S"
+    assert output["query_sha256"] == PINNED_STRICT_V2_S_QUERY_SHA256
+    assert output["result_schema_sha256"] == (
+        STRICT_V2_S_CANDIDATE_SCHEMA_SHA256
+    )
+    assert output["cutoff_height"] == 959_187
+    assert output["network_requests"] == 0
+    assert output["receipt_reads"] == 0
+    assert output["provider_requests"] == 0
+    assert output["provider_points"] == 0
+    assert output["written_paths"] == []
+    assert output["candidate_materialization_allowed"] is False
+    assert not (tmp_path / "universe").exists()
+
+
+def test_strict_v2_s_materialization_live_checkpoint_writes_nothing(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    _write_exact_receipts(tmp_path / "universe", monkeypatch)
+    before = {
+        path.relative_to(tmp_path).as_posix()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    backend = FakeStrictV2SBackend()
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: backend,
+    )
+
+    exit_code = main(
+        [
+            "universe",
+            "probe",
+            "bigquery-strict-v2-s-materialization",
+            "--live-dry-run",
+            "--expected-query-sha256",
+            PINNED_STRICT_V2_S_QUERY_SHA256,
+            "--expected-result-schema-sha256",
+            STRICT_V2_S_CANDIDATE_SCHEMA_SHA256,
+            "--monthly-processing-budget-bytes",
+            "2000000000000",
+            "--reserve-bytes",
+            "250000000000",
+        ]
+    )
+    output = _output(capsys)
+    after = {
+        path.relative_to(tmp_path).as_posix()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    assert exit_code == 0
+    assert output["status"] == "checkpoint_passed"
+    assert output["population_contract_status"] == "accepted"
+    assert output["dry_run_bytes"] == 637_999_682_243
+    assert output["network_requests"] == 3
+    assert output["candidate_rows_returned"] == 0
+    assert output["candidate_materialization_allowed"] is False
+    assert output["provider_requests"] == 0
+    assert output["provider_points"] == 0
+    assert output["written_paths"] == []
+    assert backend.calls == [
+        "table_metadata",
+        "monthly_successful_query_usage",
+        "dry_run",
+    ]
+    assert after == before
 
 
 def test_bigquery_candidate_statistics_execution_preview_is_offline(

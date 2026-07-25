@@ -285,6 +285,43 @@ network or provider calls and writes nothing. Even an accepted result keeps
 `candidate_materialization_allowed=false`; it permits a separately reviewed
 materialization design only.
 
+## Strict V2-S Candidate Materialization Cost Checkpoint
+
+The Strict V2-S candidate query is a separate, address-level contract. It
+reuses the fixed `btc_candidate_statistics_v2` policy CTEs and selects only the
+`1,090,411` expected coarse-union addresses in deterministic P0, P1, edge, and
+coarse-other tiers. Its result schema contains no transaction hash, block hash,
+provider payload, or consumer decision.
+
+The current milestone exposes only offline preview and a free BigQuery dry run:
+
+```bash
+cai universe probe bigquery-strict-v2-s-materialization --dry-run
+
+cai universe probe bigquery-strict-v2-s-materialization --live-dry-run \
+  --expected-query-sha256 \
+  46af66e53382264ce8948720ac40f1c556d44e682847f3bf9ef829b317ae31c6 \
+  --expected-result-schema-sha256 \
+  ae5e08ff63b55f9bce3f5bbd17f858f2a29ec3da85223fd2f3c6675043883683 \
+  --monthly-processing-budget-bytes 2000000000000 \
+  --reserve-bytes 250000000000
+```
+
+The live checkpoint first validates the two immutable population receipts,
+their exact `output_defined` and `positive_value` counts, and the expected
+Strict V2-S tier counts. It then performs exactly three read-only BigQuery
+operations: transaction-table metadata, current-month successful query usage,
+and one dry run with no billable execution cap. Source schema or checksum
+drift blocks before the cost estimate.
+
+`checkpoint_passed` means only that the fixed query compiled, its estimated
+bytes are at most `650,000,000,000`, and the operator-supplied monthly budget
+still preserves its requested reserve after a hypothetical execution. Both
+`dry_run` and `checkpoint_passed` keep
+`candidate_materialization_allowed=false`, return zero candidate rows, make
+zero provider calls, and write no path. Creating a destination table or
+running the billed source scan requires a separate reviewed authorization.
+
 A public BigQuery dataset is not automatically free.
 BigQuery free tier is account-wide. The candidate-statistics
 probe estimates remaining capacity only from successful billed query jobs
