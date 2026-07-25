@@ -73,15 +73,15 @@ return an address, or write a candidate artifact.
   explicit non-authorization semantics.
 - [x] Run focused, universe, and full tests; compile checks; `git diff --check`;
   sensitive-value scan; staged preflight; and final code review.
-- [ ] Merge and push the reviewed implementation to exact `origin/main`.
-- [ ] From exact main, run one free live dry run with:
+- [x] Merge and push the reviewed implementation to exact `origin/main`.
+- [x] From exact main, run one free live dry run with:
   - fixed cutoff;
   - exact query and result-schema checksums;
   - explicit monthly byte budget and reserve;
   - zero destination/write/provider behavior.
-- [ ] Save an aggregate-only audit with the exact checkpoint result. Do not
+- [x] Save an aggregate-only audit with the exact checkpoint result. Do not
   store credentials, raw upstream payloads, address rows, or private paths.
-- [ ] Stop. Do not proceed to Phase 2 without separate user approval.
+- [x] Stop. Do not proceed to Phase 2 without separate user approval.
 
 ## Phase 2: One-Shot Cloud Materialization
 
