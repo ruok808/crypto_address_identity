@@ -293,14 +293,18 @@ reuses the fixed `btc_candidate_statistics_v2` policy CTEs and selects only the
 coarse-other tiers. Its result schema contains no transaction hash, block hash,
 provider payload, or consumer decision.
 
-The current milestone exposes only offline preview and a free BigQuery dry run:
+Strict V2-S is frozen as the current BTC bootstrap materialization policy. It
+does not require a V3 before addresses are delivered. Long-term policy review
+happens only after the immutable address artifact exists and is audited.
+
+The cost checkpoint remains the mandatory first boundary:
 
 ```bash
 cai universe probe bigquery-strict-v2-s-materialization --dry-run
 
 cai universe probe bigquery-strict-v2-s-materialization --live-dry-run \
   --expected-query-sha256 \
-  46af66e53382264ce8948720ac40f1c556d44e682847f3bf9ef829b317ae31c6 \
+  5cb4990e01b4983910d0d813b67e148b985111108e6a26a251fadf95b18506d3 \
   --expected-result-schema-sha256 \
   ae5e08ff63b55f9bce3f5bbd17f858f2a29ec3da85223fd2f3c6675043883683 \
   --monthly-processing-budget-bytes 2000000000000 \
@@ -321,6 +325,59 @@ still preserves its requested reserve after a hypothetical execution. Both
 `candidate_materialization_allowed=false`, return zero candidate rows, make
 zero provider calls, and write no path. Creating a destination table or
 running the billed source scan requires a separate reviewed authorization.
+
+After that authorization, the one-shot command must repeat every pinned value
+from the accepted checkpoint. `--execute-once` creates one private expiring
+destination table and one mode-`0600` receipt. It sets
+`maximum_bytes_billed=650000000000`, uses `WRITE_EMPTY`, disables automatic
+retry, and cannot submit a fallback query:
+
+```bash
+cai universe execute bigquery-strict-v2-s-materialization \
+  --execute-once \
+  --authorization-id btc-v2s-bootstrap-959187-one-shot \
+  --acknowledge-billed-execution \
+  --destination-table-id \
+  cai-btc-universe-20260724.cai_private.btc_strict_v2_s_candidates_959187 \
+  --expected-query-sha256 \
+  5cb4990e01b4983910d0d813b67e148b985111108e6a26a251fadf95b18506d3 \
+  --expected-result-schema-sha256 \
+  ae5e08ff63b55f9bce3f5bbd17f858f2a29ec3da85223fd2f3c6675043883683 \
+  --expected-source-schema-sha256 \
+  7353193a75b43704d273b8bcfc4a0d4d56fc9cdc6623704bb25855a0f439dfb7 \
+  --expected-dry-run-bytes ACCEPTED_DRY_RUN_BYTES \
+  --expected-successful-query-jobs ACCEPTED_SUCCESSFUL_QUERY_JOBS \
+  --expected-month-to-date-billed-bytes ACCEPTED_MONTH_TO_DATE_BYTES \
+  --maximum-bytes-billed 650000000000 \
+  --monthly-processing-budget-bytes ACCEPTED_MONTHLY_BUDGET_BYTES \
+  --reserve-bytes ACCEPTED_RESERVE_BYTES \
+  --expected-candidate-rows 1090411 \
+  --destination-expiration-hours 168
+```
+
+Use `--dry-run` with the same arguments to inspect the execution contract
+without network or filesystem writes. If submission outcome is unknown, use
+`--reconcile-existing-job`; do not remove the receipt or resubmit.
+
+Once the receipt is `completed`, publication reads only that destination table,
+recomputes every tier/mask/score/hash locally, rejects any duplicate or invalid
+address, and atomically publishes deterministic Parquet partitions:
+
+```bash
+cai universe publish bigquery-strict-v2-s-candidates \
+  --dry-run \
+  --campaign-id btc-v2s-bootstrap-959187 \
+  --destination-table-id \
+  cai-btc-universe-20260724.cai_private.btc_strict_v2_s_candidates_959187 \
+  --source-execution-receipt COMPLETED_RECEIPT_PATH \
+  --expected-execution-receipt-sha256 COMPLETED_RECEIPT_SHA256 \
+  --expected-result-schema-sha256 \
+  ae5e08ff63b55f9bce3f5bbd17f858f2a29ec3da85223fd2f3c6675043883683
+```
+
+Replace `--dry-run` with `--publish-once` only after the completed receipt and
+destination metadata pass review. Local extraction may be retried from the same
+completed destination table before expiry; the source query may not.
 
 A public BigQuery dataset is not automatically free.
 BigQuery free tier is account-wide. The candidate-statistics

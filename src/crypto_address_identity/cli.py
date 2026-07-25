@@ -71,6 +71,19 @@ from crypto_address_identity.universe.candidate_materialization_v2_s import (
     BigQueryStrictV2SMaterializationCostProbe,
     preview_strict_v2_s_materialization_checkpoint,
 )
+from crypto_address_identity.universe.candidate_materialization_execution_v2_s import (
+    GoogleBigQueryStrictV2SMaterializationBackend,
+    StrictV2SMaterializationAlreadyAttempted,
+    StrictV2SMaterializationExecutionRequest,
+    StrictV2SMaterializationOneShotExecutor,
+    StrictV2SMaterializationReceiptInvalid,
+    preview_strict_v2_s_materialization_execution,
+)
+from crypto_address_identity.universe.candidate_publication_v2_s import (
+    CandidatePublicationError,
+    StrictV2SCandidateArtifactPublisher,
+    StrictV2SCandidatePublicationRequest,
+)
 from crypto_address_identity.universe.candidate_execution import (
     CandidateStatisticsExecutionAlreadyAttempted,
     CandidateStatisticsExecutionRequest,
@@ -558,6 +571,150 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe_execute_candidate_statistics_v2.set_defaults(
         handler=_handle_universe_execute_bigquery_candidate_statistics_v2
+    )
+
+    universe_execute_strict_v2_s = universe_execute_commands.add_parser(
+        "bigquery-strict-v2-s-materialization"
+    )
+    strict_v2_s_execution_mode = (
+        universe_execute_strict_v2_s.add_mutually_exclusive_group(
+            required=True
+        )
+    )
+    strict_v2_s_execution_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+    )
+    strict_v2_s_execution_mode.add_argument(
+        "--execute-once",
+        action="store_true",
+    )
+    strict_v2_s_execution_mode.add_argument(
+        "--reconcile-existing-job",
+        action="store_true",
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--authorization-id",
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--acknowledge-billed-execution",
+        action="store_true",
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--destination-table-id",
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--expected-query-sha256",
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--expected-result-schema-sha256",
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--expected-source-schema-sha256",
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--expected-dry-run-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--expected-successful-query-jobs",
+        type=int,
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--expected-month-to-date-billed-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--maximum-bytes-billed",
+        type=int,
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--monthly-processing-budget-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--reserve-bytes",
+        type=int,
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--expected-candidate-rows",
+        type=int,
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--destination-expiration-hours",
+        type=int,
+        required=True,
+    )
+    universe_execute_strict_v2_s.add_argument(
+        "--reconcile-timeout-seconds",
+        type=float,
+        default=300.0,
+    )
+    universe_execute_strict_v2_s.set_defaults(
+        handler=_handle_universe_execute_bigquery_strict_v2_s_materialization
+    )
+
+    universe_publish = universe_commands.add_parser("publish")
+    universe_publish_commands = universe_publish.add_subparsers(
+        dest="universe_publish_command",
+        required=True,
+    )
+    universe_publish_strict_v2_s = universe_publish_commands.add_parser(
+        "bigquery-strict-v2-s-candidates"
+    )
+    strict_v2_s_publication_mode = (
+        universe_publish_strict_v2_s.add_mutually_exclusive_group(
+            required=True
+        )
+    )
+    strict_v2_s_publication_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+    )
+    strict_v2_s_publication_mode.add_argument(
+        "--publish-once",
+        action="store_true",
+    )
+    universe_publish_strict_v2_s.add_argument(
+        "--campaign-id",
+        required=True,
+    )
+    universe_publish_strict_v2_s.add_argument(
+        "--destination-table-id",
+        required=True,
+    )
+    universe_publish_strict_v2_s.add_argument(
+        "--source-execution-receipt",
+        type=Path,
+        required=True,
+    )
+    universe_publish_strict_v2_s.add_argument(
+        "--expected-execution-receipt-sha256",
+        required=True,
+    )
+    universe_publish_strict_v2_s.add_argument(
+        "--expected-result-schema-sha256",
+        required=True,
+    )
+    universe_publish_strict_v2_s.add_argument(
+        "--page-size",
+        type=int,
+        default=10_000,
+    )
+    universe_publish_strict_v2_s.set_defaults(
+        handler=_handle_universe_publish_bigquery_strict_v2_s_candidates
     )
 
     universe_validate = universe_commands.add_parser("validate")
@@ -1267,6 +1424,110 @@ def _handle_universe_probe_bigquery_strict_v2_s_materialization(
     return outcome.model_dump(mode="json")
 
 
+def _handle_universe_execute_bigquery_strict_v2_s_materialization(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    request = StrictV2SMaterializationExecutionRequest(
+        authorization_id=arguments.authorization_id,
+        billing_acknowledged=arguments.acknowledge_billed_execution,
+        destination_table_id=arguments.destination_table_id,
+        expected_query_sha256=arguments.expected_query_sha256,
+        expected_result_schema_sha256=(
+            arguments.expected_result_schema_sha256
+        ),
+        expected_source_schema_sha256=(
+            arguments.expected_source_schema_sha256
+        ),
+        expected_dry_run_bytes=arguments.expected_dry_run_bytes,
+        expected_successful_query_jobs=(
+            arguments.expected_successful_query_jobs
+        ),
+        expected_month_to_date_billed_bytes=(
+            arguments.expected_month_to_date_billed_bytes
+        ),
+        maximum_bytes_billed=arguments.maximum_bytes_billed,
+        monthly_processing_budget_bytes=(
+            arguments.monthly_processing_budget_bytes
+        ),
+        reserve_bytes=arguments.reserve_bytes,
+        expected_candidate_rows=arguments.expected_candidate_rows,
+        destination_expiration_hours=(
+            arguments.destination_expiration_hours
+        ),
+    )
+    receipt_root = settings.universe_root / "executions"
+    if arguments.dry_run:
+        outcome = preview_strict_v2_s_materialization_execution(
+            request,
+            dataset=settings.bigquery_dataset,
+            receipt_root=receipt_root,
+        )
+        return outcome.model_dump(mode="json")
+
+    executor = StrictV2SMaterializationOneShotExecutor(
+        backend=_make_strict_v2_s_backend(settings),
+        dataset=settings.bigquery_dataset,
+        receipt_root=receipt_root,
+        max_source_age=timedelta(
+            hours=settings.universe_max_source_age_hours
+        ),
+    )
+    try:
+        if arguments.reconcile_existing_job:
+            outcome = executor.reconcile_existing_job(
+                request,
+                timeout_seconds=arguments.reconcile_timeout_seconds,
+            )
+        else:
+            outcome = executor.run(request)
+    except StrictV2SMaterializationAlreadyAttempted as exc:
+        raise CliError(
+            "Strict V2-S materialization authorization was already attempted",
+            error_code="strict_v2_s_materialization_already_attempted",
+        ) from exc
+    except StrictV2SMaterializationReceiptInvalid as exc:
+        raise CliError(
+            "Strict V2-S materialization receipt is not reconcilable",
+            error_code="strict_v2_s_materialization_receipt_invalid",
+        ) from exc
+    return outcome.model_dump(mode="json")
+
+
+def _handle_universe_publish_bigquery_strict_v2_s_candidates(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    request = StrictV2SCandidatePublicationRequest(
+        campaign_id=arguments.campaign_id,
+        destination_table_id=arguments.destination_table_id,
+        source_execution_receipt_path=(
+            arguments.source_execution_receipt
+        ),
+        expected_execution_receipt_sha256=(
+            arguments.expected_execution_receipt_sha256
+        ),
+        artifact_root=settings.universe_root,
+        expected_result_schema_sha256=(
+            arguments.expected_result_schema_sha256
+        ),
+        page_size=arguments.page_size,
+    )
+    try:
+        if arguments.dry_run:
+            outcome = StrictV2SCandidateArtifactPublisher.preview(request)
+        else:
+            outcome = StrictV2SCandidateArtifactPublisher(
+                backend=_make_strict_v2_s_backend(settings),
+            ).run(request)
+    except CandidatePublicationError as exc:
+        raise CliError(
+            "Strict V2-S candidate publication was blocked",
+            error_code="strict_v2_s_candidate_publication_blocked",
+        ) from exc
+    return outcome.model_dump(mode="json")
+
+
 def _handle_universe_execute_bigquery_candidate_statistics(
     arguments: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -1563,6 +1824,19 @@ def _make_bigquery_backend(settings: Settings) -> GoogleBigQueryBackend:
             "BigQuery billing project is unavailable"
         )
     return GoogleBigQueryBackend(
+        billing_project=settings.bigquery_billing_project,
+        location=settings.bigquery_location,
+    )
+
+
+def _make_strict_v2_s_backend(
+    settings: Settings,
+) -> GoogleBigQueryStrictV2SMaterializationBackend:
+    if not settings.bigquery_billing_project:
+        raise BigQueryCredentialsUnavailable(
+            "BigQuery billing project is unavailable"
+        )
+    return GoogleBigQueryStrictV2SMaterializationBackend(
         billing_project=settings.bigquery_billing_project,
         location=settings.bigquery_location,
     )

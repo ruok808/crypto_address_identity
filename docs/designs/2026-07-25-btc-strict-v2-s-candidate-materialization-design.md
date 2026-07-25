@@ -2,10 +2,16 @@
 
 ## Status
 
-Proposed for implementation planning only.
+Approved as the frozen BTC bootstrap materialization policy.
 
-This document does not authorize a BigQuery execution, destination table,
-address export, provider request, or consumer behavior change.
+Strict V2-S is not a placeholder for a required V3. The next billed source
+scan, if separately authorized, must materialize the actual address rows under
+this contract. Whether Strict V2-S remains the long-term policy is decided only
+after address-level quality review of the published artifact.
+
+This approval covers implementation and free cost validation. It does not
+authorize a billed BigQuery execution, provider request, or consumer behavior
+change.
 
 ## Goal
 
@@ -13,6 +19,9 @@ Materialize the exact Strict V2-S coarse candidate union from the fixed
 positive-value BTC population in one full-history source scan. The artifact
 must support deterministic prioritization and later provider enrichment
 without repeating the expensive source scan.
+
+The bootstrap deliverable is the immutable address artifact, not another
+aggregate-only count.
 
 ## Source Contract
 

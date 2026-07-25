@@ -7,10 +7,16 @@ Implement the candidate-materialization path designed in
 without conflating the free cost checkpoint with authorization to execute the
 approximately 638 GB source scan.
 
-The first delivery milestone ends after a reviewed, exact-main, free BigQuery
-dry run reports the fixed SQL/schema checksums, estimated bytes, current-month
-usage, projected usage, and reserve. It must not create a destination table,
-return an address, or write a candidate artifact.
+Strict V2-S is frozen for the BTC bootstrap stage and does not require a V3
+before materialization. The implementation must make the next separately
+authorized source scan produce durable address rows, not only aggregate
+counts. Long-term policy changes are downstream of address-level quality
+review and cannot be introduced as a prerequisite to this delivery.
+
+The implementation milestone ends after reviewed code and a fresh exact-main
+free BigQuery dry run report the fixed SQL/schema checksums, estimated bytes,
+current-month usage, projected usage, and reserve. It must not create a
+destination table until the user separately authorizes the billed execution.
 
 ## Architecture
 
@@ -20,9 +26,11 @@ return an address, or write a candidate artifact.
 - Add a cost-only probe that uses the existing BigQuery backend for:
   table metadata, current-month successful query usage, and one free dry run.
 - Add offline and live-dry-run CLI modes.
-- Keep one-shot query execution, destination-table creation, extraction, local
-  publication, provider enrichment, and consumer integration outside the first
-  milestone.
+- Add an exact-contract one-shot executor and same-job reconciler, but keep
+  billed execution disabled until separate approval.
+- Add bounded extraction and immutable local publication so the authorized job
+  delivers actual address rows.
+- Keep provider enrichment and consumer integration outside this milestone.
 
 ## Fixed Contracts
 
@@ -85,35 +93,36 @@ return an address, or write a candidate artifact.
 
 ## Phase 2: One-Shot Cloud Materialization
 
-This phase is planned but not authorized by the current request.
+Implementation is approved; billed execution remains separately gated.
 
-- [ ] Review the free dry-run estimate and available billing reserve.
+- [ ] Review the refreshed free dry-run estimate and available billing reserve.
 - [ ] Obtain explicit approval for the exact estimate, SQL checksum, schema
   checksum, job id, destination table id, and `650,000,000,000` byte cap.
-- [ ] Add a no-retry one-shot executor with an exclusive mode-`0600` receipt.
-- [ ] Use a deterministic private destination table, `WRITE_EMPTY`, and a
+- [x] Add a no-retry one-shot executor with an exclusive mode-`0600` receipt.
+- [x] Use a deterministic private destination table, `WRITE_EMPTY`, and a
   seven-day expiration.
-- [ ] Refuse overwrite, automatic query retry, fallback query, or a second
+- [x] Refuse overwrite, automatic query retry, fallback query, or a second
   materialization variant.
-- [ ] Add existing-job reconciliation that uses `get_job` and destination-table
+- [x] Add existing-job reconciliation that uses `get_job` and destination-table
   metadata only; it must never resubmit the query.
 - [ ] Execute once only after all reviewed values still match.
 
 ## Phase 3: Extraction And Publication
 
-This phase is also not authorized by the current request.
+Implementation is approved; publication waits for the authorized completed
+destination job.
 
-- [ ] Stream the completed destination table through the BigQuery Storage API
+- [x] Stream the completed destination table through the BigQuery Storage API
   in bounded Arrow batches.
-- [ ] Write deterministic Parquet partitions by tier and 64-way address bucket.
-- [ ] Recompute every tier, score, P0 mask, support mask, and row checksum
+- [x] Write deterministic Parquet partitions by tier and 64-way address bucket.
+- [x] Recompute every tier, score, P0 mask, support mask, and row checksum
   locally.
-- [ ] Enforce exact total/tier counts, unique valid mainnet addresses, fixed
+- [x] Enforce exact total/tier counts, unique valid mainnet addresses, fixed
   schema, zero unapproved identifiers, and file checksum reconciliation.
-- [ ] Publish by atomic directory rename only after every gate passes.
-- [ ] Produce an immutable manifest and execution receipt; do not create a
+- [x] Publish by atomic directory rename only after every gate passes.
+- [x] Produce an immutable manifest and execution receipt; do not create a
   mutable latest pointer in v1.
-- [ ] Keep provider enrichment and any `quant_crypto` consumer effect outside
+- [x] Keep provider enrichment and any `quant_crypto` consumer effect outside
   this phase.
 
 ## Verification Commands
@@ -121,6 +130,9 @@ This phase is also not authorized by the current request.
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider \
   tests/universe/test_candidate_materialization_v2_s.py \
+  tests/universe/test_candidate_materialization_execution_v2_s.py \
+  tests/universe/test_candidate_materialization_cli_v2_s.py \
+  tests/universe/test_candidate_publication_v2_s.py \
   tests/universe/test_cli.py
 
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider \
@@ -130,7 +142,9 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
 
 python -m py_compile \
   src/crypto_address_identity/cli.py \
-  src/crypto_address_identity/universe/candidate_materialization_v2_s.py
+  src/crypto_address_identity/universe/candidate_materialization_v2_s.py \
+  src/crypto_address_identity/universe/candidate_materialization_execution_v2_s.py \
+  src/crypto_address_identity/universe/candidate_publication_v2_s.py
 
 git diff --check
 ```
@@ -146,6 +160,13 @@ git diff --check
 - `network_requests=3`, `provider_requests=0`, `provider_points=0`, and
   `written_paths=[]`.
 - No destination table, address row, transaction hash, candidate artifact, or
-  consumer behavior is created.
+  consumer behavior is created before separate billed-execution approval.
+- The one-shot executor can write one expiring private destination table and
+  cannot automatically retry or submit a second query.
+- A completed destination table can be extracted repeatedly without another
+  source scan.
+- Successful publication contains the actual `1,090,411` unique valid address
+  rows in exact tier counts, with locally recomputed policy fields and hashes.
+- No V3 is required before the Strict V2-S bootstrap artifact is delivered.
 - The final decision is either `checkpoint_passed` or a machine-readable
-  fail-closed status. Neither status authorizes Phase 2.
+  fail-closed status. Neither status authorizes the billed execution.

@@ -150,7 +150,11 @@ def test_strict_v2_s_sql_is_fixed_address_only_and_destination_free() -> None:
     assert "WHEN strict_is_p1 THEN 'p1'" in plan.sql
     assert "WHEN strict_is_edge THEN 'edge'" in plan.sql
     assert "ELSE 'coarse_other'" in plan.sql
-    assert "FARM_FINGERPRINT(normalized_address)" in plan.sql
+    assert "TO_HEX(SHA256(normalized_address))" in plan.sql
+    assert "FARM_FINGERPRINT" not in plan.sql
+    assert "CHR(31)" in plan.sql
+    assert "TO_JSON_STRING" not in plan.sql
+    assert "FORMAT('%.0f', current_utxo_sats)" in plan.sql
     assert "candidate_row_sha256" in plan.sql
     assert "ORDER BY tier_rank, address_bucket, normalized_address" in plan.sql
     upper = plan.sql.upper()
