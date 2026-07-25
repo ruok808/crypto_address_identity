@@ -17,6 +17,7 @@ from crypto_address_identity.entity_fanout import (
     BtcEntityFanoutService,
     BtcV2SCoverageSnapshotBuilder,
     CanaryEntitySeedReader,
+    EntityRetryExhaustionService,
 )
 from crypto_address_identity.providers.zero_x_router import ZeroXRouterClient
 from crypto_address_identity.storage.raw_payloads import RawPayloadStore
@@ -334,6 +335,120 @@ def test_fanout_stops_after_three_consecutive_provider_failures(
     assert result.requests == 3
     assert result.failed_entities == 3
     assert calls == 3
+
+
+def test_retry_exhaustion_is_append_only_and_excludes_entities_from_future_fanout(
+    env_mapping: dict[str, str],
+) -> None:
+    settings = _settings(env_mapping)
+    database = IdentityDatabase(settings.database_path)
+    database.migrate()
+    retry_campaign = "fixture-transient-retry"
+    with database.write_transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO ingestion_run (
+                ingestion_run_id, mode, status, started_at, completed_at,
+                request_limit, response_bytes_budget
+            ) VALUES (
+                'retry-run', 'execute', 'blocked',
+                '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z',
+                25, 1048576
+            )
+            """
+        )
+        for index, entity_id in enumerate(("entity-a", "entity-b"), start=1):
+            observation_id = f"retry-observation-{index}"
+            connection.execute(
+                """
+                INSERT INTO source_observation (
+                    observation_id, source_id, source_version, source_kind,
+                    endpoint_template, query_profile, requested_at,
+                    completed_at, http_status, outcome, response_bytes,
+                    chain_key, ingestion_run_id
+                ) VALUES (
+                    ?, '0xrouter', 'fixture', 'provider',
+                    '/chaindata/intelligence/entity_predictions/{entity}',
+                    ?, '2026-07-25T00:00:00Z',
+                    '2026-07-25T00:00:00Z', 502, 'http_error', 100,
+                    'bitcoin', 'retry-run'
+                )
+                """,
+                (
+                    observation_id,
+                    f"btc_v2s_entity_fanout:{retry_campaign}",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO coverage_entity_prediction_attempt (
+                    prediction_attempt_id, prediction_attempt_fingerprint,
+                    observation_id, provider_entity_id, outcome, attempted_at
+                ) VALUES (?, ?, ?, ?, 'http_error',
+                          '2026-07-25T00:00:00Z')
+                """,
+                (
+                    f"attempt-{index}",
+                    f"attempt-fingerprint-{index}",
+                    observation_id,
+                    entity_id,
+                ),
+            )
+
+    service = EntityRetryExhaustionService(database)
+    dry_run = service.finalize(
+        campaign_id=retry_campaign,
+        reason="transient_retry_exhausted",
+        dry_run=True,
+        exhausted_at=datetime(2026, 7, 25, tzinfo=UTC),
+    )
+    executed = service.finalize(
+        campaign_id=retry_campaign,
+        reason="transient_retry_exhausted",
+        dry_run=False,
+        exhausted_at=datetime(2026, 7, 25, tzinfo=UTC),
+    )
+    repeated = service.finalize(
+        campaign_id=retry_campaign,
+        reason="transient_retry_exhausted",
+        dry_run=False,
+        exhausted_at=datetime(2026, 7, 25, tzinfo=UTC),
+    )
+
+    assert dry_run.planned_entities == 2
+    assert executed.inserted_entities == 2
+    assert repeated.inserted_entities == 0
+    assert repeated.already_exhausted_entities == 2
+
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=[])
+
+    provider = ZeroXRouterClient(
+        settings, transport=httpx.MockTransport(handler)
+    )
+    try:
+        fanout = BtcEntityFanoutService(
+            database=database,
+            settings=settings,
+            provider=provider,
+            raw_payloads=RawPayloadStore(
+                database, settings.raw_payload_root
+            ),
+        ).run(
+            entity_ids=("entity-a", "entity-b"),
+            dry_run=True,
+            request_limit=10,
+        )
+    finally:
+        provider.close()
+
+    assert fanout.planned_entities == 0
+    assert fanout.retry_exhausted_entities == 2
+    assert calls == 0
 
 
 def test_coverage_snapshot_uses_deterministic_state_precedence(

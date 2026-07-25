@@ -514,6 +514,85 @@ BEGIN
 END;
 """
 
+_MIGRATION_009_SQL = """
+CREATE TABLE coverage_entity_retry_exhaustion (
+    exhaustion_id TEXT PRIMARY KEY,
+    exhaustion_fingerprint TEXT NOT NULL UNIQUE,
+    provider_entity_id TEXT NOT NULL UNIQUE,
+    source_campaign_id TEXT NOT NULL,
+    source_query_profile TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK (
+        reason IN ('transient_retry_exhausted')
+    ),
+    exhausted_at TEXT NOT NULL
+);
+
+CREATE INDEX coverage_entity_retry_exhaustion_campaign
+ON coverage_entity_retry_exhaustion(
+    source_campaign_id, exhausted_at, provider_entity_id
+);
+
+CREATE TABLE coverage_address_campaign (
+    campaign_id TEXT PRIMARY KEY,
+    queue_manifest_sha256 TEXT NOT NULL,
+    cohort TEXT NOT NULL CHECK (cohort IN ('urgent', 'p0', 'p1')),
+    point_limit INTEGER NOT NULL CHECK (point_limit > 0),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE coverage_address_campaign_attempt (
+    address_attempt_id TEXT PRIMARY KEY,
+    address_attempt_fingerprint TEXT NOT NULL UNIQUE,
+    campaign_id TEXT NOT NULL REFERENCES coverage_address_campaign(campaign_id),
+    queue_manifest_sha256 TEXT NOT NULL,
+    address_id TEXT NOT NULL REFERENCES address_subject(address_id),
+    cohort TEXT NOT NULL CHECK (cohort IN ('urgent', 'p0', 'p1')),
+    reserved_at TEXT NOT NULL,
+    UNIQUE (campaign_id, address_id)
+);
+
+CREATE INDEX coverage_address_campaign_attempt_lookup
+ON coverage_address_campaign_attempt(
+    campaign_id, cohort, reserved_at, address_id
+);
+
+CREATE TRIGGER coverage_entity_retry_exhaustion_no_update
+BEFORE UPDATE ON coverage_entity_retry_exhaustion
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_retry_exhaustion is immutable');
+END;
+
+CREATE TRIGGER coverage_entity_retry_exhaustion_no_delete
+BEFORE DELETE ON coverage_entity_retry_exhaustion
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_entity_retry_exhaustion is immutable');
+END;
+
+CREATE TRIGGER coverage_address_campaign_no_update
+BEFORE UPDATE ON coverage_address_campaign
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_address_campaign is immutable');
+END;
+
+CREATE TRIGGER coverage_address_campaign_no_delete
+BEFORE DELETE ON coverage_address_campaign
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_address_campaign is immutable');
+END;
+
+CREATE TRIGGER coverage_address_campaign_attempt_no_update
+BEFORE UPDATE ON coverage_address_campaign_attempt
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_address_campaign_attempt is immutable');
+END;
+
+CREATE TRIGGER coverage_address_campaign_attempt_no_delete
+BEFORE DELETE ON coverage_address_campaign_attempt
+BEGIN
+    SELECT RAISE(ABORT, 'coverage_address_campaign_attempt is immutable');
+END;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration("001_initial_ledger", _MIGRATION_001_SQL),
     Migration("002_claim_review", _MIGRATION_002_SQL),
@@ -523,6 +602,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration("006_coverage_address_parse_result", _MIGRATION_006_SQL),
     Migration("007_coverage_entity_prediction_parse_result", _MIGRATION_007_SQL),
     Migration("008_coverage_entity_prediction_attempt", _MIGRATION_008_SQL),
+    Migration("009_v2s_address_enrichment_campaign", _MIGRATION_009_SQL),
 )
 
 

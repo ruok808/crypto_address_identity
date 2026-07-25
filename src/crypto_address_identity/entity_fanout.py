@@ -82,6 +82,7 @@ class EntityFanoutResult:
     local_entities: int
     merged_unique_entities: int
     terminal_cached_entities: int
+    retry_exhausted_entities: int
     campaign_attempted_entities: int
     planned_entities: int
     requests: int
@@ -99,6 +100,19 @@ class EntityFanoutResult:
     estimated_points: int
     outcome_counts: dict[str, int]
     written_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class EntityRetryExhaustionResult:
+    status: str
+    dry_run: bool
+    campaign_id: str
+    campaign_attempts: int
+    eligible_502_entities: int
+    non_502_attempts: int
+    already_exhausted_entities: int
+    planned_entities: int
+    inserted_entities: int
 
 
 @dataclass(frozen=True)
@@ -272,7 +286,8 @@ class BtcEntityFanoutService:
         input_ids = _ordered_entity_ids(entity_ids)
         local_ids = self._local_entity_ids() if include_local_entities else ()
         merged_ids = _ordered_entity_ids((*input_ids, *local_ids))
-        terminal = self._terminal_entity_ids()
+        retry_exhausted = self._retry_exhausted_entity_ids()
+        terminal = self._terminal_entity_ids() | retry_exhausted
         attempted = self._campaign_attempted_entity_ids(campaign_id)
         due = tuple(
             entity_id
@@ -291,6 +306,9 @@ class BtcEntityFanoutService:
                 local_entities=len(local_ids),
                 merged_unique_entities=len(merged_ids),
                 terminal_cached_entities=len(set(merged_ids) & terminal),
+                retry_exhausted_entities=len(
+                    set(merged_ids) & retry_exhausted
+                ),
                 campaign_attempted_entities=len(set(merged_ids) & attempted),
                 planned_entities=len(planned),
                 requests=0,
@@ -483,6 +501,9 @@ class BtcEntityFanoutService:
             local_entities=len(local_ids),
             merged_unique_entities=len(merged_ids),
             terminal_cached_entities=len(set(merged_ids) & terminal),
+            retry_exhausted_entities=len(
+                set(merged_ids) & retry_exhausted
+            ),
             campaign_attempted_entities=len(set(merged_ids) & attempted),
             planned_entities=len(planned),
             requests=request_count,
@@ -526,6 +547,16 @@ class BtcEntityFanoutService:
                 WHERE parse_outcome IN ({placeholders})
                 """,
                 _TERMINAL_PARSE_OUTCOMES,
+            ).fetchall()
+        return {row["provider_entity_id"] for row in rows}
+
+    def _retry_exhausted_entity_ids(self) -> set[str]:
+        with self.database.read_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT provider_entity_id
+                FROM coverage_entity_retry_exhaustion
+                """
             ).fetchall()
         return {row["provider_entity_id"] for row in rows}
 
@@ -742,6 +773,124 @@ class BtcEntityFanoutService:
                     run_id,
                 ),
             )
+
+
+class EntityRetryExhaustionService:
+    """Freeze one reviewed set of repeated transient 502 entity failures."""
+
+    def __init__(self, database: IdentityDatabase) -> None:
+        self.database = database
+
+    def finalize(
+        self,
+        *,
+        campaign_id: str,
+        reason: str,
+        dry_run: bool,
+        exhausted_at: datetime | None = None,
+    ) -> EntityRetryExhaustionResult:
+        campaign_id = _normalize_campaign_id(campaign_id)
+        if reason != "transient_retry_exhausted":
+            raise ValueError("unsupported retry exhaustion reason")
+        query_profile = _campaign_query_profile(campaign_id)
+        with self.database.read_connection() as connection:
+            attempts = connection.execute(
+                """
+                SELECT attempt.provider_entity_id, attempt.outcome,
+                       observation.http_status
+                FROM coverage_entity_prediction_attempt AS attempt
+                JOIN source_observation AS observation
+                  ON observation.observation_id = attempt.observation_id
+                WHERE observation.query_profile = ?
+                ORDER BY attempt.provider_entity_id
+                """,
+                (query_profile,),
+            ).fetchall()
+            already = {
+                row["provider_entity_id"]
+                for row in connection.execute(
+                    """
+                    SELECT provider_entity_id
+                    FROM coverage_entity_retry_exhaustion
+                    """
+                ).fetchall()
+            }
+        eligible = tuple(
+            sorted(
+                {
+                    row["provider_entity_id"]
+                    for row in attempts
+                    if row["outcome"] == "http_error"
+                    and row["http_status"] == 502
+                }
+            )
+        )
+        non_502 = sum(
+            row["outcome"] != "http_error" or row["http_status"] != 502
+            for row in attempts
+        )
+        if non_502:
+            raise ValueError(
+                "retry exhaustion campaign contains non-502 attempts"
+            )
+        planned = tuple(
+            entity_id for entity_id in eligible if entity_id not in already
+        )
+        common = {
+            "campaign_id": campaign_id,
+            "campaign_attempts": len(attempts),
+            "eligible_502_entities": len(eligible),
+            "non_502_attempts": non_502,
+            "already_exhausted_entities": len(set(eligible) & already),
+            "planned_entities": len(planned),
+        }
+        if dry_run:
+            return EntityRetryExhaustionResult(
+                status="dry_run",
+                dry_run=True,
+                inserted_entities=0,
+                **common,
+            )
+        if not attempts:
+            raise ValueError("retry exhaustion campaign has no attempts")
+        timestamp = _utc_string(
+            _as_utc(exhausted_at or datetime.now(UTC))
+        )
+        inserted = 0
+        with self.database.write_transaction() as connection:
+            for entity_id in planned:
+                fingerprint = _json_sha256(
+                    {
+                        "provider_entity_id": entity_id,
+                        "source_campaign_id": campaign_id,
+                        "reason": reason,
+                    }
+                )
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO coverage_entity_retry_exhaustion (
+                        exhaustion_id, exhaustion_fingerprint,
+                        provider_entity_id, source_campaign_id,
+                        source_query_profile, reason, exhausted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        fingerprint,
+                        entity_id,
+                        campaign_id,
+                        query_profile,
+                        reason,
+                        timestamp,
+                    ),
+                )
+                inserted += int(cursor.rowcount == 1)
+        return EntityRetryExhaustionResult(
+            status="completed" if inserted else "noop",
+            dry_run=False,
+            inserted_entities=inserted,
+            **common,
+        )
 
 
 class BtcV2SCoverageSnapshotBuilder:

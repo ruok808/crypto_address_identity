@@ -588,6 +588,75 @@ The snapshot stores provider entity IDs only in the ignored local artifact.
 CLI and audit output expose aggregate counts, checksums, and paths rather than
 address or entity lists.
 
+### V2-S Address Enrichment Closure
+
+Repeated transient entity failures are not silently retried forever. After one
+separately authorized retry campaign has completed, freeze an all-502 campaign
+into the append-only exhaustion ledger:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity coverage-sync \
+  finalize-entity-retries \
+  --campaign-id btc-v2s-bootstrap-959187-transient-502-retry-20260725 \
+  --dry-run
+```
+
+Review the aggregate count, then repeat without `--dry-run`. The command accepts
+only campaigns whose recorded attempts are all HTTP 502. Exhausted entity IDs
+are excluded from both the bootstrap fanout and the regular coverage-sync entity
+queue. Reopening one requires a new reviewed policy; changing or deleting the
+append-only rows is forbidden.
+
+Build the direct-address queue from one exact coverage snapshot and the original
+V2-S candidate campaign:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity coverage-sync \
+  build-v2s-address-queue \
+  --candidate-campaign-root data/universe/campaigns/btc-v2s-bootstrap-959187 \
+  --coverage-snapshot-root data/coverage/btc-v2s-bootstrap-959187/<snapshot> \
+  --output-root data/enrichment/btc-v2s-bootstrap-959187/queues
+```
+
+The local ignored queue contains only P0/P1 rows still marked
+`needs_direct_enrichment`. Active conflicts and explicit address-level requests
+form the `urgent` cohort. Remaining rows form `p0` and `p1`. Ordering is fixed by
+cohort, V2 score, current UTXO value, lifetime received value, and canonical
+address. The queue manifest pins both source manifests and its own Parquet
+checksum.
+
+Each live campaign is permanently bound to one queue manifest, one cohort, and
+one point limit. The attempt reservation is written before the provider call,
+so a process crash cannot cause the same campaign to pay for an address twice:
+
+```bash
+PYTHONPATH=src python -m crypto_address_identity coverage-sync \
+  address-enrichment \
+  --queue-root data/enrichment/btc-v2s-bootstrap-959187/queues/<queue> \
+  --campaign-id btc-v2s-959187-urgent-20260725 \
+  --cohort urgent \
+  --request-limit 500 \
+  --campaign-point-limit 500 \
+  --dry-run
+```
+
+Securely load the token and repeat without `--dry-run` only after reviewing the
+aggregate plan. The runner uses the validated
+`address_enriched/{address}/all` profile, zero transport retries, the shared
+25/minute ceiling, the 50 MiB run budget, a three-failure circuit breaker, and
+content-addressed raw storage. It reports counts and checksums, never addresses
+or provider payloads.
+
+Successful responses append Tier C evidence through the existing evidence
+service. Newly observed provider entity IDs become deduplicated entity seeds.
+Run a new entity-fanout campaign once, rebuild the coverage snapshot and queue,
+then continue with the remaining P0 cohort and finally P1. Newly covered
+non-explicit addresses are skipped at dispatch time even if they remain in an
+older queue; urgent conflict/explicit rows still require direct enrichment.
+
+Do not query `edge` or `coarse_other` through this bootstrap command. They
+require a separate marginal-yield decision after P0/P1 completes.
+
 ### Daily Local Incremental Task
 
 The optional macOS LaunchAgent is for low-frequency maintenance after bootstrap;

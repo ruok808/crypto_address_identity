@@ -15,6 +15,11 @@ import httpx
 from pydantic import ValidationError
 
 from crypto_address_identity import __version__
+from crypto_address_identity.address_enrichment import (
+    AddressEnrichmentArtifactError,
+    BtcV2SAddressEnrichmentService,
+    BtcV2SAddressQueueBuilder,
+)
 from crypto_address_identity.audit import (
     build_provider_reliability_panel,
     seed_official_calibration_candidates,
@@ -36,6 +41,7 @@ from crypto_address_identity.entity_fanout import (
     BtcEntityFanoutService,
     BtcV2SCoverageSnapshotBuilder,
     CanaryEntitySeedReader,
+    EntityRetryExhaustionService,
 )
 from crypto_address_identity.evidence import EvidenceInput, EvidenceService, VerifierRegistry
 from crypto_address_identity.exports import ResolverExporter
@@ -191,6 +197,48 @@ def build_parser() -> argparse.ArgumentParser:
     coverage_state.add_argument("--canary-root", type=Path, required=True)
     coverage_state.add_argument("--output-root", type=Path, required=True)
     coverage_state.set_defaults(handler=_handle_coverage_build_v2s_state)
+    coverage_exhaust = coverage_commands.add_parser(
+        "finalize-entity-retries"
+    )
+    coverage_exhaust.add_argument("--campaign-id", required=True)
+    coverage_exhaust.add_argument(
+        "--reason",
+        default="transient_retry_exhausted",
+        choices=("transient_retry_exhausted",),
+    )
+    coverage_exhaust.add_argument("--dry-run", action="store_true")
+    coverage_exhaust.set_defaults(
+        handler=_handle_coverage_finalize_entity_retries
+    )
+    coverage_queue = coverage_commands.add_parser(
+        "build-v2s-address-queue"
+    )
+    coverage_queue.add_argument(
+        "--candidate-campaign-root", type=Path, required=True
+    )
+    coverage_queue.add_argument(
+        "--coverage-snapshot-root", type=Path, required=True
+    )
+    coverage_queue.add_argument("--output-root", type=Path, required=True)
+    coverage_queue.set_defaults(
+        handler=_handle_coverage_build_v2s_address_queue
+    )
+    coverage_enrich = coverage_commands.add_parser("address-enrichment")
+    coverage_enrich.add_argument("--queue-root", type=Path, required=True)
+    coverage_enrich.add_argument("--campaign-id", required=True)
+    coverage_enrich.add_argument(
+        "--cohort", choices=("urgent", "p0", "p1"), required=True
+    )
+    coverage_enrich.add_argument(
+        "--request-limit", type=int, default=100
+    )
+    coverage_enrich.add_argument(
+        "--campaign-point-limit", type=int, required=True
+    )
+    coverage_enrich.add_argument("--dry-run", action="store_true")
+    coverage_enrich.set_defaults(
+        handler=_handle_coverage_address_enrichment
+    )
 
     evidence = commands.add_parser("evidence")
     evidence_commands = evidence.add_subparsers(dest="evidence_command", required=True)
@@ -1021,6 +1069,75 @@ def _handle_coverage_build_v2s_state(
         canary_root=arguments.canary_root,
         output_root=arguments.output_root,
     )
+    return asdict(result)
+
+
+def _handle_coverage_finalize_entity_retries(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    database = IdentityDatabase(settings.database_path)
+    if not arguments.dry_run:
+        database.migrate()
+    result = EntityRetryExhaustionService(database).finalize(
+        campaign_id=arguments.campaign_id,
+        reason=arguments.reason,
+        dry_run=arguments.dry_run,
+    )
+    return asdict(result)
+
+
+def _handle_coverage_build_v2s_address_queue(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    try:
+        result = BtcV2SAddressQueueBuilder().build(
+            candidate_campaign_root=arguments.candidate_campaign_root,
+            coverage_snapshot_root=arguments.coverage_snapshot_root,
+            output_root=arguments.output_root,
+        )
+    except AddressEnrichmentArtifactError as exc:
+        raise CliError(
+            "address queue artifact blocked",
+            error_code="address_queue_artifact_blocked",
+        ) from exc
+    return asdict(result)
+
+
+def _handle_coverage_address_enrichment(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    settings = Settings()
+    database = IdentityDatabase(settings.database_path)
+    if not arguments.dry_run:
+        database.migrate()
+        if settings.provider_token_value() is None:
+            raise ProviderTokenMissing()
+    provider = ZeroXRouterClient(settings)
+    try:
+        result = BtcV2SAddressEnrichmentService(
+            database=database,
+            settings=settings,
+            provider=provider,
+            raw_payloads=RawPayloadStore(
+                database, settings.raw_payload_root
+            ),
+            evidence=EvidenceService(database, VerifierRegistry()),
+        ).run(
+            queue_root=arguments.queue_root,
+            campaign_id=arguments.campaign_id,
+            cohort=arguments.cohort,
+            request_limit=arguments.request_limit,
+            campaign_point_limit=arguments.campaign_point_limit,
+            dry_run=arguments.dry_run,
+        )
+    except AddressEnrichmentArtifactError as exc:
+        raise CliError(
+            "address queue artifact blocked",
+            error_code="address_queue_artifact_blocked",
+        ) from exc
+    finally:
+        provider.close()
     return asdict(result)
 
 

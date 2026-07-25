@@ -544,6 +544,17 @@ class CoverageSyncService:
                     and row["provider_entity_id"] not in cooling_down_entities
                 ):
                     priority.setdefault(row["provider_entity_id"], 75)
+            retry_exhausted = {
+                row["provider_entity_id"]
+                for row in connection.execute(
+                    """
+                    SELECT provider_entity_id
+                    FROM coverage_entity_retry_exhaustion
+                    """
+                ).fetchall()
+            }
+        for entity_id in retry_exhausted:
+            priority.pop(entity_id, None)
         return tuple(entity for entity, _ in sorted(priority.items(), key=lambda item: (-item[1], item[0]))[:limit])
 
     def _select_due_addresses(self, *, limit: int, now: datetime) -> tuple[CoverageAddressTarget, ...]:

@@ -137,6 +137,47 @@ def test_entity_seeds_are_append_only_and_deduplicated(env_mapping: dict[str, st
         assert connection.execute("SELECT COUNT(*) FROM coverage_entity_seed").fetchone()[0] == 1
 
 
+def test_retry_exhausted_entity_is_excluded_from_regular_coverage_sync(
+    env_mapping: dict[str, str],
+) -> None:
+    database, service = _service(
+        env_mapping, lambda request: httpx.Response(200, json={})
+    )
+    CoverageEntitySeedService(database).import_seeds(
+        [
+            CoverageEntitySeedInput.model_validate(
+                {
+                    "provider_entity_id": "exhausted-entity",
+                    "priority": 100,
+                    "source_reference": "fixture:exhausted",
+                    "requested_at": "2026-07-24T00:00:00Z",
+                }
+            )
+        ]
+    )
+    with database.write_transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO coverage_entity_retry_exhaustion (
+                exhaustion_id, exhaustion_fingerprint, provider_entity_id,
+                source_campaign_id, source_query_profile, reason,
+                exhausted_at
+            ) VALUES (
+                'exhaustion', 'exhaustion-fingerprint',
+                'exhausted-entity', 'fixture-retry',
+                'btc_v2s_entity_fanout:fixture-retry',
+                'transient_retry_exhausted', '2026-07-25T00:00:00Z'
+            )
+            """
+        )
+
+    selected = service._select_due_entities(
+        limit=5, now=datetime(2026, 7, 25, tzinfo=UTC)
+    )
+
+    assert selected == ()
+
+
 def test_coverage_dry_run_never_calls_provider_or_mutates_state(env_mapping: dict[str, str]) -> None:
     calls = 0
 
