@@ -16,6 +16,7 @@ from crypto_address_identity.universe.candidate_materialization_v2_s import (
 )
 from crypto_address_identity.universe.candidate_publication_v2_s import (
     CandidateArtifactExpectedCounts,
+    CandidateSubjectExclusionContract,
     StrictV2SCandidateArtifactPublisher,
 )
 from tests.universe.test_candidate_materialization_execution_v2_s import (
@@ -271,6 +272,9 @@ def test_publication_cli_writes_address_artifact(
                 p1=1,
                 edge=1,
                 coarse_other=1,
+            ),
+            exclusion_contract=CandidateSubjectExclusionContract(
+                subjects=()
             ),
         ),
     )

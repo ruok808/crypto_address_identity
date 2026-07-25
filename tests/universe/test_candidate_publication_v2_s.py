@@ -17,6 +17,7 @@ from crypto_address_identity.universe.candidate_materialization_v2_s import (
 from crypto_address_identity.universe.candidate_publication_v2_s import (
     CandidateArtifactExpectedCounts,
     CandidatePublicationError,
+    CandidateSubjectExclusionContract,
     StrictV2SCandidateArtifactPublisher,
     StrictV2SCandidatePublicationRequest,
     candidate_address_bucket,
@@ -29,6 +30,7 @@ TABLE_ID = (
     "cai-btc-universe-20260724.cai_private."
     "btc_strict_v2_s_candidates_959187"
 )
+NO_SUBJECT_EXCLUSIONS = CandidateSubjectExclusionContract(subjects=())
 
 
 def _candidate(
@@ -143,7 +145,7 @@ class MutatingReceiptBackend(FakeCandidateTableBackend):
         return metadata
 
 
-def _execution_receipt(path: Path) -> str:
+def _execution_receipt(path: Path, *, candidate_rows: int = 4) -> str:
     payload = {
         "schema_version": (
             "btc_strict_v2_s_materialization_execution_receipt_v1"
@@ -153,7 +155,7 @@ def _execution_receipt(path: Path) -> str:
         "destination_table_id": TABLE_ID,
         "query_sha256": PINNED_STRICT_V2_S_QUERY_SHA256,
         "result_schema_sha256": STRICT_V2_S_CANDIDATE_SCHEMA_SHA256,
-        "candidate_rows": 4,
+        "candidate_rows": candidate_rows,
         "candidate_materialized": True,
     }
     encoded = (
@@ -212,6 +214,26 @@ def _with_rehashed_update(
     return updated
 
 
+def _non_address_subject(
+    *,
+    subject: str = "nonstandard-subject-fixture",
+    tier: str = "coarse_other",
+) -> dict[str, object]:
+    row = _candidate(
+        address="bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
+        tier=tier,
+    )
+    return _with_rehashed_update(
+        row,
+        normalized_address=subject,
+        address_bucket=candidate_address_bucket(subject),
+    )
+
+
+def _subject_sha256(subject: str) -> str:
+    return hashlib.sha256(subject.encode("ascii")).hexdigest()
+
+
 def test_candidate_hash_and_bucket_are_deterministic() -> None:
     row = _candidate(
         address="1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
@@ -226,6 +248,28 @@ def test_candidate_hash_and_bucket_are_deterministic() -> None:
     assert row["candidate_row_sha256"] == (
         "27b6453831202877970a225f5bf46c87cfe83459697f0a6524cbd3270dcde520"
     )
+
+
+def test_production_exclusion_contract_reconciles_source_population() -> None:
+    contract = CandidateSubjectExclusionContract()
+
+    assert len(contract.subjects) == 13
+    assert contract.tier_counts() == {
+        "p0": 1,
+        "p1": 0,
+        "edge": 0,
+        "coarse_other": 12,
+    }
+    published = contract.published_counts(
+        CandidateArtifactExpectedCounts()
+    )
+    assert published.total == 1_090_398
+    assert published.by_tier() == {
+        "p0": 21_735,
+        "p1": 2_143,
+        "edge": 133_730,
+        "coarse_other": 932_790,
+    }
 
 
 def test_publication_preview_writes_nothing(tmp_path: Path) -> None:
@@ -256,12 +300,16 @@ def test_publication_writes_real_addresses_and_checksum_manifest(
             edge=1,
             coarse_other=1,
         ),
+        exclusion_contract=NO_SUBJECT_EXCLUSIONS,
     )
 
     outcome = publisher.run(request)
 
     assert outcome.status == "published"
     assert outcome.candidate_rows == 4
+    assert outcome.source_candidate_subject_rows == 4
+    assert outcome.published_address_rows == 4
+    assert outcome.excluded_non_address_subject_rows == 0
     assert outcome.tier_counts == {
         "p0": 1,
         "p1": 1,
@@ -279,6 +327,10 @@ def test_publication_writes_real_addresses_and_checksum_manifest(
     manifest_path = root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["candidate_rows"] == 4
+    assert manifest["source_candidate_subject_rows"] == 4
+    assert manifest["published_address_rows"] == 4
+    assert manifest["excluded_non_address_subject_rows"] == 0
+    assert manifest["excluded_non_address_subject_sha256"] == []
     assert manifest["source_execution_receipt_sha256"] == receipt_sha256
     assert manifest["files"]
     manifest_hash = manifest.pop("manifest_sha256")
@@ -305,6 +357,156 @@ def test_publication_writes_real_addresses_and_checksum_manifest(
     }
 
 
+def test_publication_reconciles_pinned_non_address_subject(
+    tmp_path: Path,
+) -> None:
+    subject = "nonstandard-subject-fixture"
+    subject_sha256 = _subject_sha256(subject)
+    rows = [*_rows(), _non_address_subject(subject=subject)]
+    receipt_sha256 = _execution_receipt(
+        tmp_path / "execution.json",
+        candidate_rows=5,
+    )
+    request = _request(tmp_path, receipt_sha256=receipt_sha256)
+    publisher = StrictV2SCandidateArtifactPublisher(
+        backend=FakeCandidateTableBackend(rows),
+        expected_counts=CandidateArtifactExpectedCounts(
+            total=5,
+            p0=1,
+            p1=1,
+            edge=1,
+            coarse_other=2,
+        ),
+        exclusion_contract=CandidateSubjectExclusionContract(
+            subjects=((subject_sha256, "coarse_other"),),
+        ),
+    )
+
+    outcome = publisher.run(request)
+
+    assert outcome.candidate_rows == 4
+    assert outcome.source_candidate_subject_rows == 5
+    assert outcome.source_tier_counts["coarse_other"] == 2
+    assert outcome.published_address_rows == 4
+    assert outcome.published_tier_counts["coarse_other"] == 1
+    assert outcome.excluded_non_address_subject_rows == 1
+    assert outcome.excluded_non_address_tier_counts == {
+        "p0": 0,
+        "p1": 0,
+        "edge": 0,
+        "coarse_other": 1,
+    }
+    assert outcome.excluded_non_address_subject_sha256 == (
+        subject_sha256,
+    )
+
+    root = Path(outcome.campaign_root)
+    manifest = json.loads(
+        (root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["source_candidate_subject_rows"] == 5
+    assert manifest["published_address_rows"] == 4
+    assert manifest["excluded_non_address_subject_rows"] == 1
+    assert manifest["excluded_non_address_subject_sha256"] == [
+        subject_sha256
+    ]
+    assert manifest["non_address_exclusion_reason"] == (
+        "bigquery_nonstandard_script_subject"
+    )
+    exported = []
+    for path in root.glob("candidates/tier=*/bucket=*/*.parquet"):
+        exported.extend(pq.read_table(path).to_pylist())
+    assert subject not in {
+        row["normalized_address"] for row in exported
+    }
+
+
+def test_publication_blocks_unknown_non_address_subject(
+    tmp_path: Path,
+) -> None:
+    rows = [*_rows(), _non_address_subject()]
+    receipt_sha256 = _execution_receipt(
+        tmp_path / "execution.json",
+        candidate_rows=5,
+    )
+    request = _request(tmp_path, receipt_sha256=receipt_sha256)
+    publisher = StrictV2SCandidateArtifactPublisher(
+        backend=FakeCandidateTableBackend(rows),
+        expected_counts=CandidateArtifactExpectedCounts(
+            total=5,
+            p0=1,
+            p1=1,
+            edge=1,
+            coarse_other=2,
+        ),
+        exclusion_contract=CandidateSubjectExclusionContract(subjects=()),
+    )
+
+    with pytest.raises(
+        CandidatePublicationError,
+        match="candidate row validation failed",
+    ):
+        publisher.run(request)
+
+
+def test_publication_blocks_known_exclusion_in_wrong_tier(
+    tmp_path: Path,
+) -> None:
+    subject = "nonstandard-subject-fixture"
+    rows = [*_rows(), _non_address_subject(subject=subject)]
+    receipt_sha256 = _execution_receipt(
+        tmp_path / "execution.json",
+        candidate_rows=5,
+    )
+    request = _request(tmp_path, receipt_sha256=receipt_sha256)
+    publisher = StrictV2SCandidateArtifactPublisher(
+        backend=FakeCandidateTableBackend(rows),
+        expected_counts=CandidateArtifactExpectedCounts(
+            total=5,
+            p0=1,
+            p1=1,
+            edge=1,
+            coarse_other=2,
+        ),
+        exclusion_contract=CandidateSubjectExclusionContract(
+            subjects=((_subject_sha256(subject), "p0"),),
+        ),
+    )
+
+    with pytest.raises(
+        CandidatePublicationError,
+        match="non-address subject tier mismatch",
+    ):
+        publisher.run(request)
+
+
+def test_publication_blocks_when_pinned_exclusion_is_missing(
+    tmp_path: Path,
+) -> None:
+    subject_sha256 = _subject_sha256("nonstandard-subject-fixture")
+    receipt_sha256 = _execution_receipt(tmp_path / "execution.json")
+    request = _request(tmp_path, receipt_sha256=receipt_sha256)
+    publisher = StrictV2SCandidateArtifactPublisher(
+        backend=FakeCandidateTableBackend(_rows()),
+        expected_counts=CandidateArtifactExpectedCounts(
+            total=4,
+            p0=1,
+            p1=1,
+            edge=1,
+            coarse_other=1,
+        ),
+        exclusion_contract=CandidateSubjectExclusionContract(
+            subjects=((subject_sha256, "coarse_other"),),
+        ),
+    )
+
+    with pytest.raises(
+        CandidatePublicationError,
+        match="non-address subject exclusion set mismatch",
+    ):
+        publisher.run(request)
+
+
 def test_publication_locally_bounds_large_storage_api_batches(
     tmp_path: Path,
 ) -> None:
@@ -319,6 +521,7 @@ def test_publication_locally_bounds_large_storage_api_batches(
             edge=1,
             coarse_other=1,
         ),
+        exclusion_contract=NO_SUBJECT_EXCLUSIONS,
     )
 
     outcome = publisher.run(request)
@@ -345,6 +548,7 @@ def test_publication_canonicalizes_scaled_integral_satoshi_decimals(
             edge=1,
             coarse_other=1,
         ),
+        exclusion_contract=NO_SUBJECT_EXCLUSIONS,
     )
 
     outcome = publisher.run(request)
@@ -373,6 +577,7 @@ def test_publication_blocks_receipt_change_after_initial_validation(
             edge=1,
             coarse_other=1,
         ),
+        exclusion_contract=NO_SUBJECT_EXCLUSIONS,
     )
 
     with pytest.raises(
@@ -436,6 +641,7 @@ def test_publication_blocks_duplicate_wrong_tier_or_hash(
                 row["candidate_tier"] == "coarse_other" for row in rows
             ),
         ),
+        exclusion_contract=NO_SUBJECT_EXCLUSIONS,
     )
 
     with pytest.raises(CandidatePublicationError):
@@ -469,6 +675,7 @@ def test_publication_blocks_duplicate_address_across_tiers(
             edge=1,
             coarse_other=1,
         ),
+        exclusion_contract=NO_SUBJECT_EXCLUSIONS,
     )
 
     with pytest.raises(

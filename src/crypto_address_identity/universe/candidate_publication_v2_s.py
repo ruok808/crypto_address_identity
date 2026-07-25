@@ -21,9 +21,12 @@ from typing import Literal, Protocol
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 
-from crypto_address_identity.chains.bitcoin import normalize_bitcoin_address
+from crypto_address_identity.chains.bitcoin import (
+    BitcoinAddressError,
+    normalize_bitcoin_address,
+)
 from crypto_address_identity.universe.candidate_materialization_execution_v2_s import (
     STRICT_V2_S_DESTINATION_TABLE_ID,
     STRICT_V2_S_EXECUTION_RECEIPT_VERSION,
@@ -52,6 +55,79 @@ _CAMPAIGN_RE = re.compile(
 )
 _TIERS = ("p0", "p1", "edge", "coarse_other")
 _TIER_RANKS = {tier: index for index, tier in enumerate(_TIERS)}
+STRICT_V2_S_KNOWN_NON_ADDRESS_SUBJECTS = (
+    (
+        "032e9c22a9ec9d745f8a68f34b09e882"
+        "9dd2f9f125957bab67b24ae0e0406130",
+        "coarse_other",
+    ),
+    (
+        "3322674915fec459789a17c6319b1a792"
+        "520c6457ca45492d6eb472924d31681",
+        "coarse_other",
+    ),
+    (
+        "33ab7f786da0686675237bb637836dcb"
+        "1e2f1cc393ac975a0b3d5af47fb4cd61",
+        "p0",
+    ),
+    (
+        "5a8fe3dca85ce9a3e62396763dbe9652"
+        "e5ed470e9d3a01acacd7c87d83c44247",
+        "coarse_other",
+    ),
+    (
+        "5bfefbdddf2df75f6c1ebf39018307da"
+        "2018c8e8b18b4238011c613ee0438759",
+        "coarse_other",
+    ),
+    (
+        "688f6fd58c4b144963080c0601cd5081"
+        "d28b342305183c92a8ac7ba3e426a817",
+        "coarse_other",
+    ),
+    (
+        "8370d0502790ac3612cba5e97dd318cb"
+        "0c2f19d8673e7cc100937b1e68b63700",
+        "coarse_other",
+    ),
+    (
+        "9d6a8731f49a8fe78a90c7d4998f022"
+        "aa0eb32ec1095a1cbbe80e6915ee14c7f",
+        "coarse_other",
+    ),
+    (
+        "aebc0175dd84568868e78ef08ca06116"
+        "e3ac6b50e92e0f7328ffbf1576a037f4",
+        "coarse_other",
+    ),
+    (
+        "ba910f56d01aa4388f58ad831aeafd1c"
+        "ef66eeb4d336456adb92a482ddf251c4",
+        "coarse_other",
+    ),
+    (
+        "bbde01cfed08a454817783bf5754dcee"
+        "268acc154163c05a64e2c444743b1e7d",
+        "coarse_other",
+    ),
+    (
+        "d160286788996581958568c73a26ccfc"
+        "92e0db94f155bb1a68d686db6f9351bd",
+        "coarse_other",
+    ),
+    (
+        "f0eb840b34715d2e74083dec7597b2aa"
+        "abd068515cf1dbe4b1f926a6b1bb42ca",
+        "coarse_other",
+    ),
+)
+STRICT_V2_S_NON_ADDRESS_EXCLUSION_REASON = (
+    "bigquery_nonstandard_script_subject"
+)
+_ALLOW_NON_ADDRESS_SUBJECT_CONTEXT = (
+    "allow_checksum_pinned_non_address_subject"
+)
 _SATS_FIELDS = (
     "current_utxo_sats",
     "lifetime_received_sats",
@@ -142,6 +218,69 @@ class CandidateArtifactExpectedCounts:
         }
 
 
+@dataclass(frozen=True)
+class CandidateSubjectExclusionContract:
+    """Checksum-pinned source subjects that are not Bitcoin addresses."""
+
+    subjects: tuple[tuple[str, str], ...] = (
+        STRICT_V2_S_KNOWN_NON_ADDRESS_SUBJECTS
+    )
+    reason: str = STRICT_V2_S_NON_ADDRESS_EXCLUSION_REASON
+
+    def __post_init__(self) -> None:
+        if not self.reason:
+            raise ValueError("candidate subject exclusion reason is required")
+        if tuple(sorted(self.subjects)) != self.subjects:
+            raise ValueError(
+                "candidate subject exclusions must be checksum-sorted"
+            )
+        hashes: set[str] = set()
+        for subject_sha256, tier in self.subjects:
+            if not _SHA256_RE.fullmatch(subject_sha256):
+                raise ValueError(
+                    "candidate subject exclusion checksum is invalid"
+                )
+            if subject_sha256 in hashes:
+                raise ValueError(
+                    "candidate subject exclusion checksum is duplicated"
+                )
+            if tier not in _TIERS:
+                raise ValueError(
+                    "candidate subject exclusion tier is invalid"
+                )
+            hashes.add(subject_sha256)
+
+    def by_sha256(self) -> dict[str, str]:
+        return dict(self.subjects)
+
+    def tier_counts(self) -> dict[str, int]:
+        counts = {tier: 0 for tier in _TIERS}
+        for _, tier in self.subjects:
+            counts[tier] += 1
+        return counts
+
+    def published_counts(
+        self,
+        source: CandidateArtifactExpectedCounts,
+    ) -> CandidateArtifactExpectedCounts:
+        exclusions = self.tier_counts()
+        values = {
+            tier: source.by_tier()[tier] - exclusions[tier]
+            for tier in _TIERS
+        }
+        if any(value < 0 for value in values.values()):
+            raise ValueError(
+                "candidate subject exclusions exceed source counts"
+            )
+        return CandidateArtifactExpectedCounts(
+            total=source.total - len(self.subjects),
+            p0=values["p0"],
+            p1=values["p1"],
+            edge=values["edge"],
+            coarse_other=values["coarse_other"],
+        )
+
+
 class StrictV2SCandidateRow(UniverseModel):
     normalized_address: str
     candidate_tier: Literal["p0", "p1", "edge", "coarse_other"]
@@ -196,10 +335,18 @@ class StrictV2SCandidateRow(UniverseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_policy(self) -> "StrictV2SCandidateRow":
-        subject = normalize_bitcoin_address(self.normalized_address)
-        if subject.normalized_address != self.normalized_address:
-            raise ValueError("candidate address is not canonical")
+    def validate_policy(
+        self,
+        info: ValidationInfo,
+    ) -> "StrictV2SCandidateRow":
+        allow_non_address = bool(
+            info.context
+            and info.context.get(_ALLOW_NON_ADDRESS_SUBJECT_CONTEXT)
+        )
+        if not allow_non_address:
+            subject = normalize_bitcoin_address(self.normalized_address)
+            if subject.normalized_address != self.normalized_address:
+                raise ValueError("candidate address is not canonical")
         if self.address_bucket != candidate_address_bucket(
             self.normalized_address
         ):
@@ -297,6 +444,13 @@ class StrictV2SCandidatePublicationOutcome(UniverseModel):
     destination_table_id: str
     candidate_rows: int = Field(ge=0)
     tier_counts: dict[str, int]
+    source_candidate_subject_rows: int = Field(ge=0)
+    source_tier_counts: dict[str, int]
+    published_address_rows: int = Field(ge=0)
+    published_tier_counts: dict[str, int]
+    excluded_non_address_subject_rows: int = Field(ge=0)
+    excluded_non_address_tier_counts: dict[str, int]
+    excluded_non_address_subject_sha256: tuple[str, ...]
     source_execution_receipt_sha256: str
     result_schema_sha256: str
     manifest_sha256: str | None = None
@@ -325,10 +479,19 @@ class StrictV2SCandidateArtifactPublisher:
         *,
         backend: CandidateTableBackend | None = None,
         expected_counts: CandidateArtifactExpectedCounts | None = None,
+        exclusion_contract: CandidateSubjectExclusionContract | None = None,
     ) -> None:
         self._backend = backend
         self._expected_counts = (
             expected_counts or CandidateArtifactExpectedCounts()
+        )
+        if expected_counts is not None and exclusion_contract is None:
+            raise ValueError(
+                "custom expected counts require an explicit "
+                "subject exclusion contract"
+            )
+        self._exclusion_contract = (
+            exclusion_contract or CandidateSubjectExclusionContract()
         )
 
     @staticmethod
@@ -345,6 +508,15 @@ class StrictV2SCandidateArtifactPublisher:
             destination_table_id=request.destination_table_id,
             candidate_rows=0,
             tier_counts={tier: 0 for tier in _TIERS},
+            source_candidate_subject_rows=0,
+            source_tier_counts={tier: 0 for tier in _TIERS},
+            published_address_rows=0,
+            published_tier_counts={tier: 0 for tier in _TIERS},
+            excluded_non_address_subject_rows=0,
+            excluded_non_address_tier_counts={
+                tier: 0 for tier in _TIERS
+            },
+            excluded_non_address_subject_sha256=(),
             source_execution_receipt_sha256=(
                 request.expected_execution_receipt_sha256
             ),
@@ -393,9 +565,16 @@ class StrictV2SCandidateArtifactPublisher:
                 request=request,
                 expected_rows=self._expected_counts.total,
             )
-            counts = {tier: 0 for tier in _TIERS}
+            source_counts = {tier: 0 for tier in _TIERS}
+            published_counts = {tier: 0 for tier in _TIERS}
+            excluded_counts = {tier: 0 for tier in _TIERS}
+            expected_exclusions = (
+                self._exclusion_contract.by_sha256()
+            )
+            observed_exclusions: dict[str, str] = {}
             shard_numbers: dict[tuple[str, int], int] = defaultdict(int)
-            total = 0
+            source_total = 0
+            published_total = 0
             seen_path = staging / ".seen_addresses.sqlite3"
             seen = sqlite3.connect(seen_path)
             seen_path.chmod(0o600)
@@ -426,15 +605,60 @@ class StrictV2SCandidateArtifactPublisher:
                         ] = defaultdict(list)
                         batch_addresses: list[tuple[str]] = []
                         for raw in batch.to_pylist():
-                            row = StrictV2SCandidateRow.model_validate(raw)
+                            try:
+                                row = StrictV2SCandidateRow.model_validate(
+                                    raw
+                                )
+                            except Exception as validation_error:
+                                try:
+                                    exclusion = (
+                                        _validate_known_non_address_subject(
+                                            raw,
+                                            expected_exclusions=(
+                                                expected_exclusions
+                                            ),
+                                        )
+                                    )
+                                except CandidatePublicationError:
+                                    raise
+                                except Exception as exclusion_error:
+                                    raise CandidatePublicationError(
+                                        "known non-address subject "
+                                        "validation failed"
+                                    ) from exclusion_error
+                                if exclusion is None:
+                                    raise CandidatePublicationError(
+                                        "candidate row validation failed"
+                                    ) from validation_error
+                                subject_sha256, tier = exclusion
+                                if subject_sha256 in observed_exclusions:
+                                    raise CandidatePublicationError(
+                                        "duplicate non-address subject "
+                                        "detected"
+                                    )
+                                observed_exclusions[subject_sha256] = tier
+                                source_counts[tier] += 1
+                                excluded_counts[tier] += 1
+                                source_total += 1
+                                continue
+                            subject_sha256 = hashlib.sha256(
+                                row.normalized_address.encode("ascii")
+                            ).hexdigest()
+                            if subject_sha256 in expected_exclusions:
+                                raise CandidatePublicationError(
+                                    "pinned non-address subject became "
+                                    "a valid address"
+                                )
                             grouped[
                                 (row.candidate_tier, row.address_bucket)
                             ].append(row.arrow_row())
                             batch_addresses.append(
                                 (row.normalized_address,)
                             )
-                            counts[row.candidate_tier] += 1
-                            total += 1
+                            source_counts[row.candidate_tier] += 1
+                            published_counts[row.candidate_tier] += 1
+                            source_total += 1
+                            published_total += 1
                         try:
                             seen.executemany(
                                 "INSERT INTO seen_address"
@@ -467,13 +691,36 @@ class StrictV2SCandidateArtifactPublisher:
                 seen.close()
             seen_path.unlink()
 
-            if total != self._expected_counts.total:
+            if source_total != self._expected_counts.total:
                 raise CandidatePublicationError(
-                    "candidate artifact total count mismatch"
+                    "candidate source subject total count mismatch"
                 )
-            if counts != self._expected_counts.by_tier():
+            if source_counts != self._expected_counts.by_tier():
                 raise CandidatePublicationError(
-                    "candidate artifact tier count mismatch"
+                    "candidate source subject tier count mismatch"
+                )
+            if observed_exclusions != expected_exclusions:
+                raise CandidatePublicationError(
+                    "non-address subject exclusion set mismatch"
+                )
+            expected_published = (
+                self._exclusion_contract.published_counts(
+                    self._expected_counts
+                )
+            )
+            if published_total != expected_published.total:
+                raise CandidatePublicationError(
+                    "published address total count mismatch"
+                )
+            if published_counts != expected_published.by_tier():
+                raise CandidatePublicationError(
+                    "published address tier count mismatch"
+                )
+            if excluded_counts != (
+                self._exclusion_contract.tier_counts()
+            ):
+                raise CandidatePublicationError(
+                    "non-address subject tier count mismatch"
                 )
             files = self._compact_shards(
                 shard_root=shard_root,
@@ -502,8 +749,22 @@ class StrictV2SCandidateArtifactPublisher:
                     request.expected_execution_receipt_sha256
                 ),
                 "destination_table_id": request.destination_table_id,
-                "candidate_rows": total,
-                "tier_counts": counts,
+                "candidate_rows": published_total,
+                "tier_counts": published_counts,
+                "source_candidate_subject_rows": source_total,
+                "source_tier_counts": source_counts,
+                "published_address_rows": published_total,
+                "published_tier_counts": published_counts,
+                "excluded_non_address_subject_rows": len(
+                    observed_exclusions
+                ),
+                "excluded_non_address_tier_counts": excluded_counts,
+                "excluded_non_address_subject_sha256": sorted(
+                    observed_exclusions
+                ),
+                "non_address_exclusion_reason": (
+                    self._exclusion_contract.reason
+                ),
                 "provider_requests": 0,
                 "provider_points": 0,
                 "files": sorted(
@@ -529,8 +790,19 @@ class StrictV2SCandidateArtifactPublisher:
             campaign_id=request.campaign_id,
             campaign_root=str(final_root),
             destination_table_id=request.destination_table_id,
-            candidate_rows=total,
-            tier_counts=counts,
+            candidate_rows=published_total,
+            tier_counts=published_counts,
+            source_candidate_subject_rows=source_total,
+            source_tier_counts=source_counts,
+            published_address_rows=published_total,
+            published_tier_counts=published_counts,
+            excluded_non_address_subject_rows=len(
+                observed_exclusions
+            ),
+            excluded_non_address_tier_counts=excluded_counts,
+            excluded_non_address_subject_sha256=tuple(
+                sorted(observed_exclusions)
+            ),
             source_execution_receipt_sha256=(
                 request.expected_execution_receipt_sha256
             ),
@@ -625,6 +897,42 @@ def candidate_row_sha256(values: Mapping[str, object]) -> str:
             value = str(value)
         encoded_fields.append(value)
     return hashlib.sha256("\x1f".join(encoded_fields).encode("ascii")).hexdigest()
+
+
+def _validate_known_non_address_subject(
+    raw: Mapping[str, object],
+    *,
+    expected_exclusions: Mapping[str, str],
+) -> tuple[str, str] | None:
+    subject = raw.get("normalized_address")
+    if not isinstance(subject, str):
+        return None
+    try:
+        subject_sha256 = hashlib.sha256(
+            subject.encode("ascii")
+        ).hexdigest()
+    except UnicodeEncodeError:
+        return None
+    expected_tier = expected_exclusions.get(subject_sha256)
+    if expected_tier is None:
+        return None
+    if raw.get("candidate_tier") != expected_tier:
+        raise CandidatePublicationError(
+            "non-address subject tier mismatch"
+        )
+    try:
+        normalize_bitcoin_address(subject)
+    except BitcoinAddressError:
+        pass
+    else:
+        raise CandidatePublicationError(
+            "pinned non-address subject became a valid address"
+        )
+    validated = StrictV2SCandidateRow.model_validate(
+        raw,
+        context={_ALLOW_NON_ADDRESS_SUBJECT_CONTEXT: True},
+    )
+    return subject_sha256, validated.candidate_tier
 
 
 def _classify_candidate(
