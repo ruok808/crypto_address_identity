@@ -264,6 +264,27 @@ known input-only diagnostic count `3`. The three input-only subjects remain
 excluded from the output-defined population and produce a warning only when
 the exact pinned count is preserved. Any count drift blocks interpretation.
 
+The completed July 24 receipts are reconciled offline through an explicit
+dual-population contract:
+
+```bash
+cai universe validate btc-importance-v2-populations --dry-run
+cai universe validate btc-importance-v2-populations --execute-readonly
+```
+
+The validator admits `1,557,941,780` output-defined addresses as completeness
+evidence and `1,531,420,608` positive-value addresses as the
+`btc_importance_v2` economic-policy denominator. Their difference,
+`26,521,172`, is the zero-value-only output-defined population. The older
+`1,557,951,354` address-scale count is a separate historical query result and
+must not be substituted for either admitted population.
+
+`--execute-readonly` reads two exact mode-`0600` receipts, validates their
+checksums and cross-references, and reports Strict V2-S capacity. It makes no
+network or provider calls and writes nothing. Even an accepted result keeps
+`candidate_materialization_allowed=false`; it permits a separately reviewed
+materialization design only.
+
 A public BigQuery dataset is not automatically free.
 BigQuery free tier is account-wide. The candidate-statistics
 probe estimates remaining capacity only from successful billed query jobs

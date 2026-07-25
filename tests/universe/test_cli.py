@@ -58,6 +58,9 @@ from tests.universe.test_candidate_execution_v2 import (
     execution_result_row as execution_result_row_v2,
     write_started_recovery_receipt,
 )
+from tests.universe.test_candidate_population_contract_v2 import (
+    _write_pair as write_dual_population_receipts,
+)
 
 
 class FakeBigQueryBackend:
@@ -151,6 +154,13 @@ class FakeCandidateExecutionBackend(FakeBigQueryBackend):
             total_bytes_processed=900,
             total_bytes_billed=900,
         )
+
+
+class FrozenCandidateExecutionDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        value = datetime(2026, 7, 24, 1, tzinfo=UTC)
+        return value if tz is None else value.astimezone(tz)
 
 
 class FakeCandidateExecutionV2Backend(FakeBigQueryBackend):
@@ -823,6 +833,10 @@ def test_bigquery_candidate_statistics_executes_once_via_explicit_cli(
     capsys,
 ) -> None:
     _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "crypto_address_identity.universe.candidate_execution.datetime",
+        FrozenCandidateExecutionDateTime,
+    )
     backend = FakeCandidateExecutionBackend()
     monkeypatch.setattr(
         "crypto_address_identity.cli._make_bigquery_backend",
@@ -1000,6 +1014,78 @@ def test_bigquery_candidate_statistics_v2_reconciles_existing_job_via_cli(
     assert backend.calls == [
         "fetch_existing_aggregate_at_most_two_no_retry",
     ]
+
+
+def test_btc_importance_v2_population_contract_preview_is_offline(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: (_ for _ in ()).throw(
+            AssertionError("network boundary")
+        ),
+    )
+
+    exit_code = main(
+        [
+            "universe",
+            "validate",
+            "btc-importance-v2-populations",
+            "--dry-run",
+        ]
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "dry_run"
+    assert output["receipt_reads"] == 0
+    assert output["network_requests"] == 0
+    assert output["written_paths"] == []
+    assert output["candidate_materialization_allowed"] is False
+    assert not (tmp_path / "universe").exists()
+
+
+def test_btc_importance_v2_population_contract_validates_via_cli(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    write_dual_population_receipts(
+        tmp_path / "universe",
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._make_bigquery_backend",
+        lambda settings: (_ for _ in ()).throw(
+            AssertionError("network boundary")
+        ),
+    )
+
+    exit_code = main(
+        [
+            "universe",
+            "validate",
+            "btc-importance-v2-populations",
+            "--execute-readonly",
+        ]
+    )
+    output = _output(capsys)
+
+    assert exit_code == 0
+    assert output["status"] == "accepted"
+    assert output["allow_population_interpretation"] is True
+    assert output["allow_materialization_design"] is True
+    assert output["candidate_materialization_allowed"] is False
+    assert output["output_defined_standard_address_count"] == 1_000
+    assert output["positive_value_standard_address_count"] == 900
+    assert output["zero_value_only_standard_address_count"] == 100
+    assert output["strict_capacity"]["status"] == "eligible_for_design"
+    assert output["network_requests"] == 0
+    assert output["written_paths"] == []
 
 
 def test_bitcoin_core_execute_readonly_uses_injected_probe(

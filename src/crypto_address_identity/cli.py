@@ -82,6 +82,10 @@ from crypto_address_identity.universe.candidate_execution_v2 import (
     CandidateStatisticsV2RecoveryEvidenceInvalid,
     preview_candidate_statistics_v2_execution,
 )
+from crypto_address_identity.universe.candidate_population_contract_v2 import (
+    preview_candidate_population_contract_v2,
+    validate_candidate_population_contract_v2,
+)
 from crypto_address_identity.universe.features import (
     BigQueryFeatureMaterializer,
     BigQueryMaterializationRequest,
@@ -524,6 +528,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe_execute_candidate_statistics_v2.set_defaults(
         handler=_handle_universe_execute_bigquery_candidate_statistics_v2
+    )
+
+    universe_validate = universe_commands.add_parser("validate")
+    universe_validate_commands = universe_validate.add_subparsers(
+        dest="universe_validate_command",
+        required=True,
+    )
+    universe_validate_populations = universe_validate_commands.add_parser(
+        "btc-importance-v2-populations"
+    )
+    population_validation_mode = (
+        universe_validate_populations.add_mutually_exclusive_group(
+            required=True
+        )
+    )
+    population_validation_mode.add_argument("--dry-run", action="store_true")
+    population_validation_mode.add_argument(
+        "--execute-readonly",
+        action="store_true",
+    )
+    universe_validate_populations.set_defaults(
+        handler=_handle_universe_validate_btc_importance_v2_populations
     )
 
     universe_probe_bitcoin = universe_probe_commands.add_parser("bitcoin-core")
@@ -1300,6 +1326,21 @@ def _handle_universe_execute_bigquery_candidate_statistics_v2(
                 "candidate v2 recovery evidence is invalid",
                 error_code="candidate_v2_recovery_evidence_invalid",
             ) from exc
+    return outcome.model_dump(mode="json")
+
+
+def _handle_universe_validate_btc_importance_v2_populations(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    receipt_root = Settings().universe_root / "executions"
+    if arguments.dry_run:
+        outcome = preview_candidate_population_contract_v2(
+            receipt_root=receipt_root,
+        )
+    else:
+        outcome = validate_candidate_population_contract_v2(
+            receipt_root=receipt_root,
+        )
     return outcome.model_dump(mode="json")
 
 
