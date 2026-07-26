@@ -4,7 +4,9 @@ import sqlite3
 
 import pytest
 
+from crypto_address_identity.chains.bitcoin import normalize_bitcoin_address
 from crypto_address_identity.evidence import EvidenceInput, EvidenceService, VerifierRegistry
+from crypto_address_identity.storage import sqlite as sqlite_storage
 from crypto_address_identity.storage.sqlite import IdentityDatabase, MigrationError
 
 
@@ -58,6 +60,113 @@ def test_migration_is_repeatable_and_detects_changed_historic_checksum(runtime_r
 
     with pytest.raises(MigrationError, match="checksum"):
         database.migrate()
+
+
+def test_migration_upgrades_v9_campaign_tables_to_accept_p2(
+    runtime_root,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = IdentityDatabase(runtime_root / "identity.sqlite3")
+    migrations = sqlite_storage.MIGRATIONS
+    monkeypatch.setattr(sqlite_storage, "MIGRATIONS", migrations[:-1])
+    database.migrate()
+    subject = normalize_bitcoin_address(
+        "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+    )
+    with database.write_transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO address_subject (
+                address_id, chain_key, normalized_address, display_address,
+                address_type, first_seen_at
+            ) VALUES (?, 'bitcoin', ?, ?, ?, ?)
+            """,
+            (
+                subject.address_id,
+                subject.normalized_address,
+                subject.display_address,
+                subject.address_type,
+                "2026-07-25T00:00:00Z",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO coverage_address_campaign (
+                campaign_id, queue_manifest_sha256, cohort,
+                point_limit, created_at
+            ) VALUES ('legacy-p0', ?, 'p0', 10, ?)
+            """,
+            ("a" * 64, "2026-07-25T00:00:00Z"),
+        )
+        connection.execute(
+            """
+            INSERT INTO coverage_address_campaign_attempt (
+                address_attempt_id, address_attempt_fingerprint,
+                campaign_id, queue_manifest_sha256, address_id,
+                cohort, reserved_at
+            ) VALUES ('legacy-attempt', ?, 'legacy-p0', ?, ?, 'p0', ?)
+            """,
+            (
+                "c" * 64,
+                "a" * 64,
+                subject.address_id,
+                "2026-07-25T00:00:00Z",
+            ),
+        )
+
+    monkeypatch.setattr(sqlite_storage, "MIGRATIONS", migrations)
+    database.migrate()
+    with database.write_transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO coverage_address_campaign (
+                campaign_id, queue_manifest_sha256, cohort,
+                point_limit, created_at
+            ) VALUES ('new-p2', ?, 'p2', 10, ?)
+            """,
+            ("b" * 64, "2026-07-26T00:00:00Z"),
+        )
+        connection.execute(
+            """
+            INSERT INTO coverage_address_campaign_attempt (
+                address_attempt_id, address_attempt_fingerprint,
+                campaign_id, queue_manifest_sha256, address_id,
+                cohort, reserved_at
+            ) VALUES ('new-attempt', ?, 'new-p2', ?, ?, 'p2', ?)
+            """,
+            (
+                "d" * 64,
+                "b" * 64,
+                subject.address_id,
+                "2026-07-26T00:00:00Z",
+            ),
+        )
+        rows = connection.execute(
+            """
+            SELECT campaign_id, cohort
+            FROM coverage_address_campaign
+            ORDER BY campaign_id
+            """
+        ).fetchall()
+        attempt_rows = connection.execute(
+            """
+            SELECT address_attempt_id, cohort
+            FROM coverage_address_campaign_attempt
+            ORDER BY address_attempt_id
+            """
+        ).fetchall()
+
+    assert [(row["campaign_id"], row["cohort"]) for row in rows] == [
+        ("legacy-p0", "p0"),
+        ("new-p2", "p2"),
+    ]
+    assert [
+        (row["address_attempt_id"], row["cohort"])
+        for row in attempt_rows
+    ] == [
+        ("legacy-attempt", "p0"),
+        ("new-attempt", "p2"),
+    ]
 
 
 def test_foreign_keys_are_enforced(runtime_root) -> None:

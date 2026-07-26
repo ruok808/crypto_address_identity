@@ -148,3 +148,29 @@ Operational gates:
 
 P2 remains Tier C discovery and lookup evidence. It does not override local
 evidence and does not directly alter downstream alert or suppression policy.
+
+## Pre-Execution Schema Gate
+
+The first resident-process start exposed a local schema compatibility gap
+before any provider request was sent. Application code accepted cohort `p2`,
+but migration 009 still constrained the two campaign tables to
+`urgent/p0/p1`. SQLite therefore ignored the new P2 attempt rows.
+
+Observed impact:
+
+| Metric | Result |
+| --- | ---: |
+| Provider observations | 0 |
+| Provider points | 0 |
+| Address attempts accepted | 0 |
+| Local failed quota reservations | 205 |
+
+The process was stopped. Migration 010 rebuilds both campaign tables with
+`p2` in the cohort CHECK while copying all existing P0/P1 campaigns and
+attempts, recreating indexes, foreign keys, and append-only triggers. Tests
+prove a v9 database preserves a legacy P0 attempt and accepts a new P2 attempt
+after migration.
+
+The failed local reservations remain audit evidence and are not deleted. The
+orphan run is marked failed with a schema-gate reason before the campaign is
+restarted from the checksum-pinned queue.
