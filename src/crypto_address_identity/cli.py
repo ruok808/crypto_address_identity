@@ -19,6 +19,7 @@ from crypto_address_identity.address_enrichment import (
     AddressEnrichmentArtifactError,
     BtcV2SAddressEnrichmentService,
     BtcV2SAddressQueueBuilder,
+    BtcV2SP2AddressQueueBuilder,
 )
 from crypto_address_identity.audit import (
     build_provider_reliability_panel,
@@ -223,11 +224,39 @@ def build_parser() -> argparse.ArgumentParser:
     coverage_queue.set_defaults(
         handler=_handle_coverage_build_v2s_address_queue
     )
+    coverage_p2_queue = coverage_commands.add_parser(
+        "build-v2s-p2-address-queue"
+    )
+    coverage_p2_queue.add_argument(
+        "--candidate-campaign-root", type=Path, required=True
+    )
+    coverage_p2_queue.add_argument(
+        "--coverage-snapshot-root", type=Path, required=True
+    )
+    coverage_p2_queue.add_argument(
+        "--output-root", type=Path, required=True
+    )
+    coverage_p2_queue.add_argument(
+        "--actual-points", type=int, required=True
+    )
+    coverage_p2_queue.add_argument(
+        "--account-reserve-points", type=int, required=True
+    )
+    coverage_p2_queue.add_argument(
+        "--fanout-recovery-reserve-points", type=int, required=True
+    )
+    coverage_p2_queue.add_argument(
+        "--observed-p95-points-per-address", type=int, default=1
+    )
+    coverage_p2_queue.add_argument("--dry-run", action="store_true")
+    coverage_p2_queue.set_defaults(
+        handler=_handle_coverage_build_v2s_p2_address_queue
+    )
     coverage_enrich = coverage_commands.add_parser("address-enrichment")
     coverage_enrich.add_argument("--queue-root", type=Path, required=True)
     coverage_enrich.add_argument("--campaign-id", required=True)
     coverage_enrich.add_argument(
-        "--cohort", choices=("urgent", "p0", "p1"), required=True
+        "--cohort", choices=("urgent", "p0", "p1", "p2"), required=True
     )
     coverage_enrich.add_argument(
         "--request-limit", type=int, default=100
@@ -1100,6 +1129,32 @@ def _handle_coverage_build_v2s_address_queue(
         raise CliError(
             "address queue artifact blocked",
             error_code="address_queue_artifact_blocked",
+        ) from exc
+    return asdict(result)
+
+
+def _handle_coverage_build_v2s_p2_address_queue(
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    try:
+        result = BtcV2SP2AddressQueueBuilder().build(
+            candidate_campaign_root=arguments.candidate_campaign_root,
+            coverage_snapshot_root=arguments.coverage_snapshot_root,
+            output_root=arguments.output_root,
+            actual_points=arguments.actual_points,
+            account_reserve_points=arguments.account_reserve_points,
+            fanout_recovery_reserve_points=(
+                arguments.fanout_recovery_reserve_points
+            ),
+            observed_p95_points_per_address=(
+                arguments.observed_p95_points_per_address
+            ),
+            dry_run=arguments.dry_run,
+        )
+    except AddressEnrichmentArtifactError as exc:
+        raise CliError(
+            "P2 address queue artifact blocked",
+            error_code="p2_address_queue_artifact_blocked",
         ) from exc
     return asdict(result)
 

@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -41,13 +42,15 @@ from crypto_address_identity.storage.raw_payloads import RawPayloadStore
 from crypto_address_identity.storage.sqlite import IdentityDatabase
 
 
-AddressCohort = Literal["urgent", "p0", "p1"]
+AddressCohort = Literal["urgent", "p0", "p1", "p2"]
 
 _ADDRESS_ESTIMATED_BYTES = 65_536
 _POINT_UNIT_BYTES = 100_000
 _MAX_REQUESTS_PER_RUN = 500
 _MAX_CONSECUTIVE_FAILURES = 3
-_COHORT_ORDER = {"urgent": 0, "p0": 1, "p1": 2}
+_COHORT_ORDER = {"urgent": 0, "p0": 1, "p1": 2, "p2": 3}
+_P2_TIERS = {"edge", "coarse_other"}
+_P2_SELECTION_SEED = "btc-v2s-p2-economic-leader-v1:"
 _QUEUE_COLUMNS = (
     "queue_rank",
     "address_id",
@@ -73,6 +76,29 @@ class AddressQueueBuildResult:
     queue_id: str
     queue_rows: int
     cohort_counts: dict[str, int]
+    source_coverage_snapshot_id: str
+    parquet_path: Path
+    parquet_sha256: str
+    manifest_path: Path
+    manifest_sha256: str
+
+
+@dataclass(frozen=True)
+class P2AddressQueueBuildResult:
+    status: str
+    written: bool
+    queue_id: str
+    queue_rows: int
+    eligible_rows: int
+    mandatory_direct_rows: int
+    tier_counts: dict[str, int]
+    actual_points: int
+    account_reserve_points: int
+    campaign_point_limit: int
+    fanout_recovery_reserve_points: int
+    direct_point_limit: int
+    observed_p95_points_per_address: int
+    selection_threshold_economic_value_sats: int | None
     source_coverage_snapshot_id: str
     parquet_path: Path
     parquet_sha256: str
@@ -275,7 +301,7 @@ class BtcV2SAddressQueueBuilder:
                 "queue_rows": len(ordered),
                 "cohort_counts": {
                     cohort: counts.get(cohort, 0)
-                    for cohort in _COHORT_ORDER
+                    for cohort in ("urgent", "p0", "p1")
                 },
                 "ordering": [
                     "cohort",
@@ -314,7 +340,7 @@ class BtcV2SAddressQueueBuilder:
             queue_rows=len(ordered),
             cohort_counts={
                 cohort: counts.get(cohort, 0)
-                for cohort in _COHORT_ORDER
+                for cohort in ("urgent", "p0", "p1")
             },
             source_coverage_snapshot_id=str(
                 coverage_manifest.get("snapshot_id")
@@ -443,6 +469,500 @@ class BtcV2SAddressQueueBuilder:
                         }
                     )
         return result
+
+
+class BtcV2SP2AddressQueueBuilder:
+    """Build a point-bounded queue from uncovered edge/coarse economic leaders."""
+
+    def build(
+        self,
+        *,
+        candidate_campaign_root: Path,
+        coverage_snapshot_root: Path,
+        output_root: Path,
+        actual_points: int,
+        account_reserve_points: int,
+        fanout_recovery_reserve_points: int,
+        observed_p95_points_per_address: int,
+        built_at: datetime | None = None,
+        dry_run: bool = False,
+    ) -> P2AddressQueueBuildResult:
+        candidate_root = Path(candidate_campaign_root)
+        coverage_root = Path(coverage_snapshot_root)
+        output_root = Path(output_root)
+        built_at = _as_utc(built_at or datetime.now(UTC))
+        (
+            campaign_point_limit,
+            direct_point_limit,
+            max_addresses,
+        ) = self._budget(
+            actual_points=actual_points,
+            account_reserve_points=account_reserve_points,
+            fanout_recovery_reserve_points=fanout_recovery_reserve_points,
+            observed_p95_points_per_address=(
+                observed_p95_points_per_address
+            ),
+        )
+
+        candidate_manifest_path = candidate_root / "manifest.json"
+        candidate_manifest = _verified_manifest(candidate_manifest_path)
+        coverage_manifest_path = coverage_root / "manifest.json"
+        coverage_manifest = _verified_manifest(coverage_manifest_path)
+        candidate_manifest_file_sha = _file_sha256(
+            candidate_manifest_path
+        )
+        if (
+            coverage_manifest.get("source_manifest_file_sha256")
+            != candidate_manifest_file_sha
+        ):
+            raise AddressEnrichmentArtifactError(
+                "coverage snapshot is not bound to the candidate manifest"
+            )
+        if (
+            coverage_manifest.get("source_campaign_id")
+            != candidate_manifest.get("campaign_id")
+        ):
+            raise AddressEnrichmentArtifactError(
+                "coverage and candidate campaign IDs differ"
+            )
+
+        candidate_paths = _verified_candidate_parquets(
+            candidate_root, candidate_manifest, tiers=_P2_TIERS
+        )
+        coverage_path = _verified_single_parquet(
+            coverage_root, coverage_manifest
+        )
+        rows, eligible_rows, mandatory_direct_rows = self._ranked_rows(
+            candidate_paths=candidate_paths,
+            coverage_path=coverage_path,
+            max_addresses=max_addresses,
+        )
+        if not rows:
+            raise AddressEnrichmentArtifactError(
+                "P2 queue has no eligible uncovered addresses"
+            )
+
+        coverage_manifest_file_sha = _file_sha256(
+            coverage_manifest_path
+        )
+        queue_id = (
+            built_at.strftime("%Y%m%dT%H%M%SZ")
+            + "-p2-"
+            + coverage_manifest_file_sha[:12]
+        )
+        final_root = output_root / queue_id
+        parquet_name = "btc_v2s_p2_address_queue.parquet"
+        parquet_path = final_root / parquet_name
+        manifest_path = final_root / "manifest.json"
+        table = self._table(rows)
+        parquet_bytes = self._parquet_bytes(table)
+        parquet_sha = hashlib.sha256(parquet_bytes).hexdigest()
+        tier_counts = Counter(row["candidate_tier"] for row in rows)
+        manifest: dict[str, Any] = {
+            "schema_version": "btc_v2s_address_enrichment_queue_v1",
+            "queue_kind": "economic_leader_p2",
+            "queue_id": queue_id,
+            "built_at": _utc_string(built_at),
+            "source_candidate_campaign_id": candidate_manifest.get(
+                "campaign_id"
+            ),
+            "source_candidate_manifest_file_sha256": (
+                candidate_manifest_file_sha
+            ),
+            "source_candidate_manifest_sha256": candidate_manifest.get(
+                "manifest_sha256"
+            ),
+            "source_coverage_snapshot_id": coverage_manifest.get(
+                "snapshot_id"
+            ),
+            "source_coverage_manifest_file_sha256": (
+                coverage_manifest_file_sha
+            ),
+            "source_coverage_manifest_sha256": coverage_manifest.get(
+                "manifest_sha256"
+            ),
+            "queue_rows": len(rows),
+            "eligible_rows": eligible_rows,
+            "mandatory_direct_rows": mandatory_direct_rows,
+            "cohort_counts": {"p2": len(rows)},
+            "tier_counts": {
+                tier: tier_counts.get(tier, 0)
+                for tier in sorted(_P2_TIERS)
+            },
+            "budget": {
+                "actual_points": actual_points,
+                "account_reserve_points": account_reserve_points,
+                "campaign_point_limit": campaign_point_limit,
+                "fanout_recovery_reserve_points": (
+                    fanout_recovery_reserve_points
+                ),
+                "direct_point_limit": direct_point_limit,
+                "observed_p95_points_per_address": (
+                    observed_p95_points_per_address
+                ),
+                "max_direct_addresses": max_addresses,
+            },
+            "selection": {
+                "policy": "btc_v2s_p2_economic_leader_v1",
+                "eligible_tiers": sorted(_P2_TIERS),
+                "coverage_state": "needs_direct_enrichment",
+                "mandatory_direct_first": True,
+                "ordering": [
+                    "mandatory_direct_desc",
+                    "economic_value_sats_desc",
+                    "v2_chain_score_desc",
+                    "selection_key_sha256",
+                ],
+                "selection_seed_sha256": hashlib.sha256(
+                    _P2_SELECTION_SEED.encode()
+                ).hexdigest(),
+                "threshold_economic_value_sats": rows[-1][
+                    "economic_value_sats"
+                ],
+            },
+            "files": [
+                {
+                    "path": parquet_name,
+                    "row_count": len(rows),
+                    "size": len(parquet_bytes),
+                    "sha256": parquet_sha,
+                }
+            ],
+        }
+        manifest_sha = _json_sha256(manifest)
+        manifest["manifest_sha256"] = manifest_sha
+        result = P2AddressQueueBuildResult(
+            status="dry_run" if dry_run else "published",
+            written=not dry_run,
+            queue_id=queue_id,
+            queue_rows=len(rows),
+            eligible_rows=eligible_rows,
+            mandatory_direct_rows=mandatory_direct_rows,
+            tier_counts={
+                tier: tier_counts.get(tier, 0)
+                for tier in sorted(_P2_TIERS)
+            },
+            actual_points=actual_points,
+            account_reserve_points=account_reserve_points,
+            campaign_point_limit=campaign_point_limit,
+            fanout_recovery_reserve_points=(
+                fanout_recovery_reserve_points
+            ),
+            direct_point_limit=direct_point_limit,
+            observed_p95_points_per_address=(
+                observed_p95_points_per_address
+            ),
+            selection_threshold_economic_value_sats=rows[-1][
+                "economic_value_sats"
+            ],
+            source_coverage_snapshot_id=str(
+                coverage_manifest.get("snapshot_id")
+            ),
+            parquet_path=parquet_path,
+            parquet_sha256=parquet_sha,
+            manifest_path=manifest_path,
+            manifest_sha256=manifest_sha,
+        )
+        if dry_run:
+            return result
+        if final_root.exists():
+            raise AddressEnrichmentArtifactError(
+                "P2 address queue snapshot already exists"
+            )
+        staging_root = (
+            output_root / f".staging-{queue_id}-{uuid.uuid4().hex}"
+        )
+        staging_root.mkdir(parents=True, mode=0o700)
+        try:
+            staging_parquet = staging_root / parquet_name
+            staging_manifest = staging_root / "manifest.json"
+            staging_parquet.write_bytes(parquet_bytes)
+            staging_manifest.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            staging_parquet.chmod(0o600)
+            staging_manifest.chmod(0o600)
+            output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.replace(staging_root, final_root)
+        except Exception:
+            shutil.rmtree(staging_root, ignore_errors=True)
+            raise
+        return result
+
+    @staticmethod
+    def _budget(
+        *,
+        actual_points: int,
+        account_reserve_points: int,
+        fanout_recovery_reserve_points: int,
+        observed_p95_points_per_address: int,
+    ) -> tuple[int, int, int]:
+        values = (
+            actual_points,
+            account_reserve_points,
+            fanout_recovery_reserve_points,
+        )
+        if any(value < 0 for value in values) or actual_points < 1:
+            raise AddressEnrichmentArtifactError(
+                "P2 point budget values are invalid"
+            )
+        if observed_p95_points_per_address < 1:
+            raise AddressEnrichmentArtifactError(
+                "P2 observed p95 points must be positive"
+            )
+        campaign_point_limit = actual_points - account_reserve_points
+        direct_point_limit = (
+            campaign_point_limit - fanout_recovery_reserve_points
+        )
+        if campaign_point_limit < 1 or direct_point_limit < 1:
+            raise AddressEnrichmentArtifactError(
+                "P2 point reserves exhaust the available balance"
+            )
+        max_addresses = (
+            direct_point_limit // observed_p95_points_per_address
+        )
+        if max_addresses < 1:
+            raise AddressEnrichmentArtifactError(
+                "P2 direct address budget is empty"
+            )
+        return campaign_point_limit, direct_point_limit, max_addresses
+
+    @staticmethod
+    def _ranked_rows(
+        *,
+        candidate_paths: tuple[Path, ...],
+        coverage_path: Path,
+        max_addresses: int,
+    ) -> tuple[list[dict[str, Any]], int, int]:
+        connection = duckdb.connect(":memory:")
+        try:
+            connection.read_parquet(
+                [str(path) for path in candidate_paths]
+            ).create_view("p2_candidates")
+            connection.read_parquet(str(coverage_path)).create_view(
+                "p2_coverage"
+            )
+            source_counts = connection.execute(
+                """
+                WITH candidate_counts AS (
+                    SELECT
+                        count(*) AS row_count,
+                        count(DISTINCT normalized_address)
+                            AS unique_addresses
+                    FROM p2_candidates
+                ),
+                coverage_counts AS (
+                    SELECT
+                        count(*) AS row_count,
+                        count(DISTINCT normalized_address)
+                            AS unique_addresses
+                    FROM p2_coverage
+                    WHERE candidate_tier IN ('edge', 'coarse_other')
+                ),
+                joined_counts AS (
+                    SELECT
+                        count(*) AS row_count,
+                        count_if(
+                            coverage.coverage_state
+                            = 'needs_direct_enrichment'
+                        ) AS eligible_rows,
+                        count_if(
+                            coverage.coverage_state
+                                = 'needs_direct_enrichment'
+                            AND (
+                                coverage.active_conflict
+                                OR coverage.explicit_direct_requirement
+                            )
+                        ) AS mandatory_direct_rows
+                    FROM p2_candidates AS candidate
+                    INNER JOIN p2_coverage AS coverage
+                        USING (
+                            normalized_address,
+                            candidate_tier,
+                            candidate_row_sha256
+                        )
+                )
+                SELECT
+                    candidate_counts.row_count,
+                    candidate_counts.unique_addresses,
+                    coverage_counts.row_count,
+                    coverage_counts.unique_addresses,
+                    joined_counts.row_count,
+                    joined_counts.eligible_rows,
+                    joined_counts.mandatory_direct_rows
+                FROM candidate_counts, coverage_counts, joined_counts
+                """
+            ).fetchone()
+            if source_counts is None:
+                raise AddressEnrichmentArtifactError(
+                    "P2 source reconciliation returned no result"
+                )
+            (
+                candidate_rows,
+                candidate_unique,
+                coverage_rows,
+                coverage_unique,
+                joined_rows,
+                eligible_rows,
+                mandatory_direct_rows,
+            ) = (int(value) for value in source_counts)
+            if (
+                candidate_rows != candidate_unique
+                or coverage_rows != coverage_unique
+                or joined_rows != candidate_rows
+                or coverage_rows != candidate_rows
+            ):
+                raise AddressEnrichmentArtifactError(
+                    "P2 candidate and coverage populations do not reconcile"
+                )
+            selected = connection.execute(
+                """
+                SELECT
+                    candidate.normalized_address,
+                    candidate.candidate_tier,
+                    candidate.v2_chain_score,
+                    candidate.current_utxo_sats,
+                    candidate.lifetime_received_sats,
+                    candidate.residual_gross_90d_sats,
+                    candidate.max_same_tx_received_lifetime_sats,
+                    candidate.max_same_tx_received_365d_sats,
+                    candidate.max_same_tx_received_90d_sats,
+                    candidate.candidate_row_sha256,
+                    coverage.active_conflict,
+                    coverage.explicit_direct_requirement,
+                    greatest(
+                        candidate.current_utxo_sats,
+                        candidate.lifetime_received_sats,
+                        candidate.residual_gross_90d_sats,
+                        candidate.max_same_tx_received_lifetime_sats,
+                        candidate.max_same_tx_received_365d_sats,
+                        candidate.max_same_tx_received_90d_sats
+                    ) AS economic_value_sats,
+                    sha256(
+                        ? || candidate.normalized_address
+                    ) AS selection_key_sha256
+                FROM p2_candidates AS candidate
+                INNER JOIN p2_coverage AS coverage
+                    USING (
+                        normalized_address,
+                        candidate_tier,
+                        candidate_row_sha256
+                    )
+                WHERE coverage.coverage_state = 'needs_direct_enrichment'
+                  AND candidate.candidate_tier IN ('edge', 'coarse_other')
+                ORDER BY
+                    (
+                        coverage.active_conflict
+                        OR coverage.explicit_direct_requirement
+                    ) DESC,
+                    economic_value_sats DESC,
+                    candidate.v2_chain_score DESC,
+                    selection_key_sha256
+                LIMIT ?
+                """,
+                [_P2_SELECTION_SEED, max_addresses],
+            ).fetch_arrow_table()
+        finally:
+            connection.close()
+        rows = selected.to_pylist()
+        seen: set[str] = set()
+        result: list[dict[str, Any]] = []
+        for rank, row in enumerate(rows, start=1):
+            subject = normalize_bitcoin_address(
+                row["normalized_address"]
+            )
+            if subject.address_id in seen:
+                raise AddressEnrichmentArtifactError(
+                    "P2 source contains duplicate selected addresses"
+                )
+            if not _is_sha256(row["candidate_row_sha256"]):
+                raise AddressEnrichmentArtifactError(
+                    "P2 candidate row hash is invalid"
+                )
+            seen.add(subject.address_id)
+            result.append(
+                {
+                    **row,
+                    "queue_rank": rank,
+                    "address_id": subject.address_id,
+                    "cohort": "p2",
+                    "current_utxo_sats": int(row["current_utxo_sats"]),
+                    "lifetime_received_sats": int(
+                        row["lifetime_received_sats"]
+                    ),
+                    "economic_value_sats": int(
+                        row["economic_value_sats"]
+                    ),
+                }
+            )
+        return result, eligible_rows, mandatory_direct_rows
+
+    @staticmethod
+    def _table(rows: list[dict[str, Any]]) -> pa.Table:
+        return pa.table(
+            {
+                "queue_rank": pa.array(
+                    [row["queue_rank"] for row in rows], type=pa.int64()
+                ),
+                "address_id": pa.array(
+                    [row["address_id"] for row in rows], type=pa.string()
+                ),
+                "normalized_address": pa.array(
+                    [row["normalized_address"] for row in rows],
+                    type=pa.string(),
+                ),
+                "candidate_tier": pa.array(
+                    [row["candidate_tier"] for row in rows],
+                    type=pa.string(),
+                ),
+                "cohort": pa.array(["p2"] * len(rows), type=pa.string()),
+                "v2_chain_score": pa.array(
+                    [row["v2_chain_score"] for row in rows],
+                    type=pa.int64(),
+                ),
+                "current_utxo_sats": pa.array(
+                    [row["current_utxo_sats"] for row in rows],
+                    type=pa.decimal128(38, 0),
+                ),
+                "lifetime_received_sats": pa.array(
+                    [row["lifetime_received_sats"] for row in rows],
+                    type=pa.decimal128(38, 0),
+                ),
+                "economic_value_sats": pa.array(
+                    [row["economic_value_sats"] for row in rows],
+                    type=pa.decimal128(38, 0),
+                ),
+                "selection_key_sha256": pa.array(
+                    [row["selection_key_sha256"] for row in rows],
+                    type=pa.string(),
+                ),
+                "active_conflict": pa.array(
+                    [row["active_conflict"] for row in rows],
+                    type=pa.bool_(),
+                ),
+                "explicit_direct_requirement": pa.array(
+                    [row["explicit_direct_requirement"] for row in rows],
+                    type=pa.bool_(),
+                ),
+                "candidate_row_sha256": pa.array(
+                    [row["candidate_row_sha256"] for row in rows],
+                    type=pa.string(),
+                ),
+            }
+        )
+
+    @staticmethod
+    def _parquet_bytes(table: pa.Table) -> bytes:
+        sink = pa.BufferOutputStream()
+        pq.write_table(
+            table,
+            sink,
+            compression="zstd",
+            version="2.6",
+            write_statistics=True,
+        )
+        return sink.getvalue().to_pybytes()
 
 
 class BtcV2SAddressEnrichmentService:
@@ -769,7 +1289,13 @@ class BtcV2SAddressEnrichmentService:
                 CoverageEntitySeedInput(
                     provider_entity_id=entity_id,
                     priority=(
-                        100 if cohort == "urgent" else 90 if cohort == "p0" else 80
+                        100
+                        if cohort == "urgent"
+                        else 90
+                        if cohort == "p0"
+                        else 80
+                        if cohort == "p1"
+                        else 70
                     ),
                     source_reference=(
                         "btc-v2s-address-enrichment:"
@@ -1218,7 +1744,7 @@ def _verified_candidate_parquets(
         paths.append(_verified_file(root, record))
     if not paths:
         raise AddressEnrichmentArtifactError(
-            "candidate manifest has no P0/P1 parquet files"
+            "candidate manifest has no parquet files for selected tiers"
         )
     return tuple(paths)
 
