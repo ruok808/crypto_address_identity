@@ -11,6 +11,8 @@ readonly worker_path="${script_dir}/coverage_sync_worker.sh"
 readonly runtime_env_path="${CAI_RUNTIME_ENV_PATH:-${HOME}/.config/crypto_address_identity/coverage-sync.env}"
 readonly python_bin="${CAI_PYTHON_BIN:-/Users/barry/.pyenv/versions/3.13.7/bin/python3}"
 readonly launch_agents_dir="${HOME}/Library/LaunchAgents"
+readonly runtime_worker_dir="${CAI_RUNTIME_WORKER_DIR:-${HOME}/Library/Application Support/crypto_address_identity/bin}"
+readonly runtime_worker_path="${runtime_worker_dir}/coverage_sync_worker.sh"
 readonly log_dir="${project_root}/logs"
 readonly log_path="${log_dir}/coverage_sync_worker.log"
 readonly target_path="${launch_agents_dir}/${label}.plist"
@@ -50,10 +52,17 @@ if launchctl print "gui/${uid}/${label}" >/dev/null 2>&1; then
   exit 75
 fi
 
-mkdir -p "$launch_agents_dir" "$log_dir"
-chmod 700 "$log_dir"
+mkdir -p "$launch_agents_dir" "$runtime_worker_dir" "$log_dir"
+chmod 700 "$runtime_worker_dir" "$log_dir"
 
-"$python_bin" - "$template_path" "$target_path" "$worker_path" "$project_root" \
+temporary_worker_path="${runtime_worker_path}.tmp.$$"
+trap 'rm -f "$temporary_worker_path"' EXIT
+cp "$worker_path" "$temporary_worker_path"
+chmod 755 "$temporary_worker_path"
+mv "$temporary_worker_path" "$runtime_worker_path"
+trap - EXIT
+
+"$python_bin" - "$template_path" "$target_path" "$runtime_worker_path" "$project_root" \
   "$runtime_env_path" "$python_bin" "$log_path" <<'PY'
 from __future__ import annotations
 

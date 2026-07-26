@@ -1422,6 +1422,7 @@ def _handle_universe_probe_bigquery(
         backend=_make_bigquery_backend(settings),
         dataset=settings.bigquery_dataset,
         max_source_age=timedelta(hours=settings.universe_max_source_age_hours),
+        now=_universe_now(),
     ).run(
         as_of_date=as_of_date,
         cutoff_height=None,
@@ -1465,6 +1466,7 @@ def _handle_universe_probe_bigquery_address_scale(
         backend=_make_bigquery_backend(settings),
         dataset=settings.bigquery_dataset,
         max_source_age=timedelta(hours=settings.universe_max_source_age_hours),
+        now=_universe_now(),
     ).run(
         cutoff_height=9_223_372_036_854_775_807,
         cutoff_time=datetime.combine(as_of_date, time.max, tzinfo=UTC),
@@ -1520,6 +1522,7 @@ def _handle_universe_probe_bigquery_candidate_statistics(
         max_source_age=timedelta(
             hours=settings.universe_max_source_age_hours
         ),
+        now=_universe_now(),
     ).run(
         cutoff_height=arguments.cutoff_height,
         cutoff_time=cutoff_time,
@@ -1579,6 +1582,7 @@ def _handle_universe_probe_bigquery_candidate_statistics_v2(
         max_source_age=timedelta(
             hours=settings.universe_max_source_age_hours
         ),
+        now=_universe_now(),
     ).run(
         cutoff_height=arguments.cutoff_height,
         cutoff_time=cutoff_time,
@@ -1952,6 +1956,7 @@ def _handle_universe_build_bigquery(
         backend=backend,
         dataset=settings.bigquery_dataset,
         max_source_age=timedelta(hours=settings.universe_max_source_age_hours),
+        now=_universe_now(),
     ).run(
         as_of_date=cutoff_time.date(),
         cutoff_height=arguments.cutoff_height,
@@ -2129,6 +2134,10 @@ def _parse_date(value: str) -> date:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise CliError("Date must be ISO-8601 YYYY-MM-DD") from exc
+
+
+def _universe_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _emit(value: dict[str, Any]) -> None:

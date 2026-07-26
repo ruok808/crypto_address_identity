@@ -93,3 +93,16 @@ def test_installer_validates_runtime_env_before_loading_the_agent() -> None:
     assert "plutil -lint" in payload
     assert "launchctl bootstrap" in payload
     assert "coverage-sync LaunchAgent is already loaded" in payload
+
+
+def test_installer_pins_worker_outside_the_git_worktree() -> None:
+    payload = (
+        LAUNCHD_ROOT / "install_coverage_sync_launch_agent.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "CAI_RUNTIME_WORKER_DIR" in payload
+    assert "Library/Application Support/crypto_address_identity/bin" in payload
+    assert 'cp "$worker_path" "$temporary_worker_path"' in payload
+    assert 'chmod 755 "$temporary_worker_path"' in payload
+    assert 'mv "$temporary_worker_path" "$runtime_worker_path"' in payload
+    assert '"$runtime_worker_path" "$project_root"' in payload

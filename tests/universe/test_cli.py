@@ -256,6 +256,10 @@ class FakeBigQueryMaterializer:
 
 
 def _configure(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "crypto_address_identity.cli._universe_now",
+        lambda: datetime(2026, 7, 24, 1, tzinfo=UTC),
+    )
     monkeypatch.setenv("CAI_DATABASE_PATH", str(tmp_path / "identity.sqlite3"))
     monkeypatch.setenv("CAI_RAW_PAYLOAD_ROOT", str(tmp_path / "raw"))
     monkeypatch.setenv("CAI_EXPORT_ROOT", str(tmp_path / "exports"))
