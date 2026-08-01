@@ -2,7 +2,7 @@
 
 Date: 2026-08-01
 
-Status: **offline remediation promoted; natural consumer cycle validated**
+Status: **campaign complete and operationally sealed**
 
 ## Scope
 
@@ -105,3 +105,10 @@ timer configuration, and unrelated production services were not changed.
 The paid P2 campaign remains closed at 190,000 direct attempts plus three
 bounded fanout/recovery requests. No P2 supervisor or detached screen session
 is running, and the daily CAI coverage-sync LaunchAgent remains unloaded.
+
+The enrichment heartbeat is archived and cannot resume paid work. Its
+replacement is a daily read-only, aggregate-only health heartbeat with no
+provider, write, restart, email, or automatic remediation capability. Both the
+prior and active immutable snapshots and the prior pin are retained as rollback
+evidence. Any future enrichment requires a separately reviewed budget, queue,
+and policy.
