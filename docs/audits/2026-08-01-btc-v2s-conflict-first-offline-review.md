@@ -2,7 +2,7 @@
 
 Date: 2026-08-01
 
-Status: **offline remediation validated; production consumer unchanged**
+Status: **offline remediation promoted; natural consumer cycle validated**
 
 ## Scope
 
@@ -78,11 +78,29 @@ All existing checks passed: both snapshots loaded, assertions remained zero,
 conflict-first and local rejection counts did not increase, and
 provider-default coverage did not regress.
 
-## Operational State
+## Production Cutover
 
-The production consumer snapshot was not changed by this review. Alert
-thresholds, ownership semantics, suppression predicates, email behavior, timer
-configuration, and unrelated production services were not changed.
+The validated staging directory was atomically renamed to its immutable final
+directory on the same filesystem. The consumer environment was then updated
+atomically, changing only the snapshot path and manifest pin. Every other
+environment byte retained its pre-cutover SHA-256, and the alert timer remained
+active and enabled without a restart.
+
+The checksum-pinned consumer loaded 40,657 `entity_control` records from the
+new production pin. The same fixed 42-day gate was re-run after cutover and
+returned `allow`: both active and candidate views used the new manifest,
+provider-default bilateral suppressions were 674, and `conflict_first`, local
+rejection, and assertion failures were all zero.
+
+One natural five-minute timer cycle started at `2026-08-01T06:53:50Z` and
+completed successfully. The worker loaded the new manifest and reported zero
+pending candidates, zero send attempts, zero sent messages, zero failures, and
+928 already-processed alerts skipped. It wrote neither outbox nor dispatch
+state, providing bounded live evidence for reachability, unchanged email
+behavior, and idempotence.
+
+Alert thresholds, ownership semantics, suppression predicates, email behavior,
+timer configuration, and unrelated production services were not changed.
 
 The paid P2 campaign remains closed at 190,000 direct attempts plus three
 bounded fanout/recovery requests. No P2 supervisor or detached screen session
